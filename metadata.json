@@ -1,0 +1,6 @@
+{
+  "name": "TECNIHUB Monitoramento",
+  "description": "Ferramenta interna da agência TECNIHUB para monitoramento de saúde, disponibilidade, tempo de resposta, SSL e incidentes dos sites dos clientes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
