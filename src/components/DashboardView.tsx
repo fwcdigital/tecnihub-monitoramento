@@ -20,7 +20,8 @@ import {
   Zap,
   Filter,
   Eye,
-  Tag
+  Tag,
+  Globe
 } from 'lucide-react';
 import { Site, Incident, SiteStatus } from '../types';
 import { getTotalTrackingIssuesCount, getSiteTrackingIssues } from '../utils/trackingAnalyzer';
@@ -37,6 +38,7 @@ interface DashboardViewProps {
   onSelectIncident: (incident: Incident) => void;
   isCheckingAll?: boolean;
   onCheckAllSites?: () => void;
+  checkingSiteId?: string | null;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -50,7 +52,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onCheckSiteNow,
   onSelectIncident,
   isCheckingAll = false,
-  onCheckAllSites
+  onCheckAllSites,
+  checkingSiteId = null
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'warning' | 'offline'>('all');
@@ -395,31 +398,51 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             />
           </div>
 
-          {/* Tabela de Sites - High Density */}
-          <div className="rounded border border-[#1e1e1e] bg-[#0a0a0a] overflow-hidden shadow-xs">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs border-collapse">
-                <thead>
-                  <tr className="border-b border-[#1e1e1e] bg-[#000000] text-[9px] font-mono uppercase tracking-wider text-neutral-400">
-                    <th className="py-2 px-3 font-semibold">Cliente</th>
-                    <th className="py-2 px-3 font-semibold">Site / Domínio</th>
-                    <th className="py-2 px-3 font-semibold">Status</th>
-                    <th className="py-2 px-3 font-semibold">Uptime</th>
-                    <th className="py-2 px-3 font-semibold">Resposta</th>
-                    <th className="py-2 px-3 font-semibold">SSL</th>
-                    <th className="py-2 px-3 font-semibold">Domínio</th>
-                    <th className="py-2 px-3 font-semibold">Última Verificação</th>
-                    <th className="py-2 px-2.5 text-right font-semibold">Ações</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#181818] font-sans">
-                  {filteredAndSortedSites.length === 0 ? (
-                    <tr>
-                      <td colSpan={9} className="py-6 text-center text-neutral-500 text-xs font-mono">
-                        Nenhum site encontrado com os filtros aplicados.
-                      </td>
+          {/* Tabela de Sites ou Estado Vazio */}
+          {sites.length === 0 ? (
+            <div className="p-8 text-center bg-[#0a0a0a] border border-[#1e1e1e] rounded shadow-xs">
+              <div className="w-10 h-10 rounded-full bg-[#141414] border border-[#222222] flex items-center justify-center mx-auto mb-3 text-neutral-400">
+                <Globe className="w-5 h-5" />
+              </div>
+              <h3 className="text-sm font-bold text-white font-sans mb-1">
+                Nenhum site sendo monitorado.
+              </h3>
+              <p className="text-xs text-neutral-400 font-mono max-w-md mx-auto mb-4">
+                Cadastre o primeiro site para iniciar o monitoramento HTTP contínuo dos serviços TECNIHUB.
+              </p>
+              <button
+                onClick={onAddSite}
+                className="px-3.5 py-1.5 text-xs font-semibold bg-white text-black hover:bg-neutral-200 rounded transition-colors shadow-xs inline-flex items-center gap-1.5"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Adicionar primeiro site
+              </button>
+            </div>
+          ) : (
+            <div className="rounded border border-[#1e1e1e] bg-[#0a0a0a] overflow-hidden shadow-xs">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs border-collapse">
+                  <thead>
+                    <tr className="border-b border-[#1e1e1e] bg-[#000000] text-[9px] font-mono uppercase tracking-wider text-neutral-400">
+                      <th className="py-2 px-3 font-semibold">Cliente</th>
+                      <th className="py-2 px-3 font-semibold">Site / Domínio</th>
+                      <th className="py-2 px-3 font-semibold">Status</th>
+                      <th className="py-2 px-3 font-semibold">Uptime</th>
+                      <th className="py-2 px-3 font-semibold">Resposta</th>
+                      <th className="py-2 px-3 font-semibold">SSL</th>
+                      <th className="py-2 px-3 font-semibold">Domínio</th>
+                      <th className="py-2 px-3 font-semibold">Última Verificação</th>
+                      <th className="py-2 px-2.5 text-right font-semibold">Ações</th>
                     </tr>
-                  ) : (
+                  </thead>
+                  <tbody className="divide-y divide-[#181818] font-sans">
+                    {filteredAndSortedSites.length === 0 ? (
+                      <tr>
+                        <td colSpan={9} className="py-6 text-center text-neutral-500 text-xs font-mono">
+                          Nenhum site encontrado com os filtros aplicados.
+                        </td>
+                      </tr>
+                    ) : (
                     filteredAndSortedSites.map((site) => {
                       const isOffline = site.status === 'offline';
                       const isWarning = site.status === 'warning';
@@ -533,10 +556,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                             <div className="flex items-center justify-end gap-1">
                               <button
                                 onClick={() => onCheckSiteNow(site.id)}
-                                title="Verificar agora"
-                                className="p-1 text-neutral-400 hover:text-white rounded hover:bg-[#181818] transition-colors"
+                                disabled={checkingSiteId === site.id}
+                                title={checkingSiteId === site.id ? 'Verificando...' : 'Verificar agora'}
+                                className="p-1 text-neutral-400 hover:text-white rounded hover:bg-[#181818] transition-colors disabled:opacity-50"
                               >
-                                <RefreshCw className="w-3 h-3" />
+                                <RefreshCw className={`w-3 h-3 ${checkingSiteId === site.id ? 'animate-spin text-emerald-400' : ''}`} />
                               </button>
 
                               <button
@@ -572,10 +596,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                                         onCheckSiteNow(site.id);
                                         setActiveActionMenuSiteId(null);
                                       }}
-                                      className="w-full text-left px-3 py-1.5 text-neutral-200 hover:bg-[#1a1a1a] flex items-center gap-2"
+                                      disabled={checkingSiteId === site.id}
+                                      className="w-full text-left px-3 py-1.5 text-neutral-200 hover:bg-[#1a1a1a] flex items-center gap-2 disabled:opacity-50"
                                     >
-                                      <RefreshCw className="w-3.5 h-3.5" />
-                                      Verificar agora
+                                      <RefreshCw className={`w-3.5 h-3.5 ${checkingSiteId === site.id ? 'animate-spin text-emerald-400' : ''}`} />
+                                      {checkingSiteId === site.id ? 'Verificando...' : 'Verificar agora'}
                                     </button>
                                     <button
                                       onClick={() => {
@@ -630,7 +655,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </table>
             </div>
           </div>
-        </div>
+        )}
+      </div>
 
         {/* Incidentes Recentes (Right Column on xl) - High Density Cards */}
         <div className="space-y-3">

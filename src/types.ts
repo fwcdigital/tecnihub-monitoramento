@@ -84,11 +84,62 @@ export interface Site {
   // Rastreamento (Tracking)
   tracking?: SiteTrackingConfig;
   
+  // WordPress & Active flags
+  isWordPress?: boolean;
+  isActive?: boolean;
+  
   // Incident & telemetry history
   checksHistory: CheckRecord[];
   activeIncidentId?: string;
   consecutiveFailures: number;
   createdAt: string;
+  updatedAt?: string;
+}
+
+export interface DbSite {
+  id: string;
+  client_name: string;
+  name: string;
+  url: string;
+  domain: string;
+  hosting_provider: string;
+  is_wordpress: boolean;
+  is_active: boolean;
+  check_interval: string;
+  expected_content?: string | null;
+  expected_ga4_id?: string | null;
+  expected_gtm_id?: string | null;
+  expected_google_ads_id?: string | null;
+  expected_meta_pixel_id?: string | null;
+  uses_search_console: boolean;
+  uses_rd_station: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DbCheck {
+  id: string;
+  site_id: string;
+  checked_at: string;
+  status: 'online' | 'warning' | 'offline';
+  http_status: number | null;
+  response_time: number | null;
+  final_url?: string | null;
+  error_type?: string | null;
+  error_message?: string | null;
+}
+
+export interface DbIncident {
+  id: string;
+  site_id: string;
+  type: string;
+  severity: IncidentSeverity;
+  title: string;
+  description?: string | null;
+  started_at: string;
+  resolved_at?: string | null;
+  status: 'active' | 'resolved';
+  created_at: string;
 }
 
 export type IncidentType = 

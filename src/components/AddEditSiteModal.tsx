@@ -8,13 +8,15 @@ interface AddEditSiteModalProps {
   onClose: () => void;
   onSave: (siteData: Partial<Site>) => void;
   siteToEdit?: Site | null;
+  isSaving?: boolean;
 }
 
 export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
   isOpen,
   onClose,
   onSave,
-  siteToEdit
+  siteToEdit,
+  isSaving = false
 }) => {
   const [client, setClient] = useState('');
   const [siteName, setSiteName] = useState('');
@@ -22,6 +24,7 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
   const [domain, setDomain] = useState('');
   const [hosting, setHosting] = useState<HostingProvider>('Hostinger');
   const [frequency, setFrequency] = useState<MonitoringFrequency>('5min');
+  const [isWordPress, setIsWordPress] = useState(false);
   
   // Toggles
   const [monitorAvailability, setMonitorAvailability] = useState(true);
@@ -60,6 +63,7 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
       setUrl(siteToEdit.url);
       setDomain(siteToEdit.domain);
       setHosting(siteToEdit.hosting);
+      setIsWordPress(Boolean(siteToEdit.isWordPress));
       setFrequency(siteToEdit.frequency);
       setMonitorAvailability(siteToEdit.monitorAvailability);
       setMonitorResponseTime(siteToEdit.monitorResponseTime);
@@ -95,6 +99,7 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
       setUrl('https://');
       setDomain('');
       setHosting('Hostinger');
+      setIsWordPress(false);
       setFrequency('5min');
       setMonitorAvailability(true);
       setMonitorResponseTime(true);
@@ -175,6 +180,7 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
       url: url.trim(),
       domain: domain.trim(),
       hosting,
+      isWordPress,
       frequency,
       monitorAvailability,
       monitorResponseTime,
@@ -289,7 +295,7 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <div>
                 <label className="block text-[11px] font-medium text-neutral-300 mb-1 font-mono">
                   Hospedagem / Provedor
@@ -312,16 +318,46 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
 
               <div>
                 <label className="block text-[11px] font-medium text-neutral-300 mb-1 font-mono">
-                  Frequência de monitoramento
+                  WordPress
+                </label>
+                <div className="flex items-center gap-1.5 pt-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setIsWordPress(true)}
+                    className={`flex-1 py-1 px-2 rounded text-xs font-mono transition-colors border text-center ${
+                      isWordPress
+                        ? 'bg-blue-950/40 text-blue-300 border-blue-600/50 font-semibold'
+                        : 'bg-[#000000] text-neutral-400 border-[#222222] hover:text-white'
+                    }`}
+                  >
+                    Sim
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsWordPress(false)}
+                    className={`flex-1 py-1 px-2 rounded text-xs font-mono transition-colors border text-center ${
+                      !isWordPress
+                        ? 'bg-[#1a1a1a] text-neutral-200 border-[#333333] font-semibold'
+                        : 'bg-[#000000] text-neutral-400 border-[#222222] hover:text-white'
+                    }`}
+                  >
+                    Não
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-medium text-neutral-300 mb-1 font-mono">
+                  Frequência de checagem
                 </label>
                 <select
                   value={frequency}
                   onChange={(e) => setFrequency(e.target.value as MonitoringFrequency)}
                   className="w-full px-2.5 py-1.5 bg-[#000000] border border-[#222222] rounded text-xs text-white focus:outline-none focus:border-neutral-500 font-mono"
                 >
-                  <option value="5min">A cada 5 minutos (Recomendado)</option>
-                  <option value="15min">A cada 15 minutos</option>
-                  <option value="30min">A cada 30 minutos</option>
+                  <option value="5min">A cada 5 min (Padrão)</option>
+                  <option value="15min">A cada 15 min</option>
+                  <option value="30min">A cada 30 min</option>
                   <option value="1hour">A cada 1 hora</option>
                   <option value="daily">Diariamente</option>
                 </select>
@@ -665,10 +701,11 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
             </button>
             <button
               type="submit"
-              className="px-3.5 py-1.5 text-xs font-semibold bg-white text-black hover:bg-neutral-200 rounded transition-colors shadow-xs flex items-center gap-1.5"
+              disabled={isSaving}
+              className="px-3.5 py-1.5 text-xs font-semibold bg-white text-black hover:bg-neutral-200 rounded transition-colors shadow-xs flex items-center gap-1.5 disabled:opacity-50"
             >
               <Check className="w-3.5 h-3.5" />
-              {siteToEdit ? 'Salvar Alterações' : 'Cadastrar e Iniciar Monitoramento'}
+              {isSaving ? 'Salvando...' : siteToEdit ? 'Salvar Alterações' : 'Cadastrar e Iniciar Monitoramento'}
             </button>
           </div>
         </form>
