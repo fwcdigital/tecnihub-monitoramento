@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { executeHttpCheck } from './services/httpChecker';
 import { getServerSupabase } from './supabase';
 
@@ -8,6 +10,9 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 app.use(cors());
 app.use(express.json());
@@ -202,7 +207,7 @@ app.post('/api/check-all', async (req, res) => {
               error_type: checkResult.errorType || null,
               error_message: checkResult.errorMessage || null
             });
-          } catch {}
+          } catch { }
         }
 
         return {
@@ -228,6 +233,18 @@ app.post('/api/check-all', async (req, res) => {
       details: err.message
     });
   }
+});
+
+const distPath = path.resolve(process.cwd(), 'dist');
+
+app.use(express.static(distPath));
+
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api/')) {
+    return next();
+  }
+
+  res.sendFile(path.join(distPath, 'index.html'));
 });
 
 app.listen(PORT, () => {

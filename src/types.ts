@@ -71,7 +71,7 @@ export interface Site {
   domainDaysRemaining: number;
   lastCheck: string; // relative or ISO
   httpStatus: number | string; // e.g. 200, 503, 500, 'ERR'
-  
+
   // Monitoring toggles
   monitorAvailability: boolean;
   monitorResponseTime: boolean;
@@ -83,11 +83,11 @@ export interface Site {
 
   // Rastreamento (Tracking)
   tracking?: SiteTrackingConfig;
-  
+
   // WordPress & Active flags
   isWordPress?: boolean;
   isActive?: boolean;
-  
+
   // Incident & telemetry history
   checksHistory: CheckRecord[];
   activeIncidentId?: string;
@@ -142,7 +142,7 @@ export interface DbIncident {
   created_at: string;
 }
 
-export type IncidentType = 
+export type IncidentType =
   | 'Site fora do ar'
   | 'HTTP 500'
   | 'HTTP 503'
@@ -186,16 +186,16 @@ export interface Incident {
 export interface AlertRule {
   id: string;
   name: string;
-  event: 
-    | 'offline'
-    | 'recovered'
-    | 'ssl_expiring'
-    | 'ssl_expired'
-    | 'domain_expiring'
-    | 'domain_expired'
-    | 'slow_response'
-    | 'http_error'
-    | 'content_missing';
+  event:
+  | 'offline'
+  | 'recovered'
+  | 'ssl_expiring'
+  | 'ssl_expired'
+  | 'domain_expiring'
+  | 'domain_expired'
+  | 'slow_response'
+  | 'http_error'
+  | 'content_missing';
   channels: {
     email: boolean;
     webhook: boolean;
