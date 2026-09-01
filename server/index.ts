@@ -1207,6 +1207,3 @@ export function startServer() {
   return server;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
-  startServer();
-}
