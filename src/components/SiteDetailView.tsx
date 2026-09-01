@@ -35,8 +35,7 @@ import {
   BarChart, 
   Bar 
 } from 'recharts';
-import { Site, CheckRecord, TrackingStatusColor } from '../types';
-import { TRACKING_TOOLS, analyzeSiteTracking } from '../utils/trackingAnalyzer';
+import { Site, CheckRecord } from '../types';
 
 interface SiteDetailViewProps {
   site: Site;
@@ -44,7 +43,6 @@ interface SiteDetailViewProps {
   onCheckNow: (siteId: string) => void;
   onEdit: (site: Site) => void;
   onTogglePause: (siteId: string) => void;
-  onVerifyTracking?: (siteId: string) => void;
   isChecking?: boolean;
 }
 
@@ -54,71 +52,33 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
   onCheckNow,
   onEdit,
   onTogglePause,
-  onVerifyTracking,
   isChecking = false
 }) => {
   const [timeRange, setTimeRange] = useState<'24h' | '7d' | '30d' | '90d'>('24h');
-  const [isVerifyingTracking, setIsVerifyingTracking] = useState(false);
 
-  const handleVerifyTrackingClick = () => {
-    setIsVerifyingTracking(true);
-    if (onVerifyTracking) {
-      onVerifyTracking(site.id);
-    }
-    setTimeout(() => {
-      setIsVerifyingTracking(false);
-    }, 800);
-  };
-
-  // Simulated latency chart data based on time range
+  // The chart is built only from persisted checks returned by the API.
   const latencyData = React.useMemo(() => {
-    if (timeRange === '24h') {
-      return [
-        { time: '00:00', responseTime: 0.82, uptime: 100 },
-        { time: '03:00', responseTime: 0.78, uptime: 100 },
-        { time: '06:00', responseTime: 0.81, uptime: 100 },
-        { time: '09:00', responseTime: 0.95, uptime: 100 },
-        { time: '11:00', responseTime: 0.89, uptime: 100 },
-        { time: '12:00', responseTime: 1.05, uptime: 100 },
-        { time: '12:30', responseTime: site.status === 'warning' ? 5.2 : 0.85, uptime: site.status === 'offline' ? 0 : 100 },
-        { time: '13:00', responseTime: site.status === 'warning' ? 4.9 : 0.82, uptime: site.status === 'offline' ? 0 : 100 },
-        { time: '13:30', responseTime: site.responseTime || 0.84, uptime: site.status === 'offline' ? 0 : 100 },
-      ];
-    } else if (timeRange === '7d') {
-      return [
-        { time: 'Seg', responseTime: 0.85, uptime: 100 },
-        { time: 'Ter', responseTime: 0.88, uptime: 100 },
-        { time: 'Qua', responseTime: 0.82, uptime: 100 },
-        { time: 'Qui', responseTime: 0.94, uptime: 99.8 },
-        { time: 'Sex', responseTime: 0.91, uptime: 100 },
-        { time: 'Sáb', responseTime: 0.78, uptime: 100 },
-        { time: 'Dom', responseTime: site.responseTime || 0.84, uptime: site.status === 'offline' ? 85 : 100 },
-      ];
-    } else if (timeRange === '30d') {
-      return Array.from({ length: 15 }, (_, i) => ({
-        time: `Dia ${i * 2 + 1}`,
-        responseTime: +(0.7 + Math.random() * 0.35 + (site.status === 'warning' && i > 12 ? 3.5 : 0)).toFixed(2),
-        uptime: site.status === 'offline' && i === 14 ? 80 : 100
+    const days = timeRange === '24h' ? 1 : timeRange === '7d' ? 7 : timeRange === '30d' ? 30 : 90;
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    return site.checksHistory
+      .filter((check) => new Date(check.checkedAt).getTime() >= cutoff && check.responseTime > 0)
+      .slice()
+      .reverse()
+      .map((check) => ({
+        time: new Date(check.checkedAt).toLocaleString('pt-BR', {
+          day: days > 1 ? '2-digit' : undefined,
+          month: days > 1 ? '2-digit' : undefined,
+          hour: '2-digit',
+          minute: '2-digit'
+        }),
+        responseTime: check.responseTime
       }));
-    } else {
-      return [
-        { time: 'Jun', responseTime: 0.82, uptime: 100 },
-        { time: 'Jul', responseTime: 0.85, uptime: 99.9 },
-        { time: 'Ago', responseTime: site.responseTime || 0.9, uptime: site.uptime30d }
-      ];
-    }
-  }, [timeRange, site]);
+  }, [timeRange, site.checksHistory]);
 
-  // Availability heat bars for 90 days representation
-  const uptimeBlocks = React.useMemo(() => {
-    return Array.from({ length: 45 }, (_, i) => {
-      const isLast = i === 44;
-      if (isLast && site.status === 'offline') return 'offline';
-      if (isLast && site.status === 'warning') return 'warning';
-      if (i === 12 && site.uptime30d < 99.5) return 'incident';
-      return 'online';
-    });
-  }, [site]);
+  const uptimeBlocks = React.useMemo(
+    () => site.checksHistory.slice(0, 90).reverse(),
+    [site.checksHistory]
+  );
 
   const isPaused = site.status === 'paused';
 
@@ -177,12 +137,12 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
             {isPaused ? (
               <>
                 <PlayCircle className="w-3.5 h-3.5 text-emerald-400" />
-                Retomar
+                Reativar monitoramento
               </>
             ) : (
               <>
                 <PauseCircle className="w-3.5 h-3.5 text-amber-400" />
-                Pausar
+                Desativar monitoramento
               </>
             )}
           </button>
@@ -206,7 +166,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
               ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
               : site.status === 'warning'
               ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-              : site.status === 'offline'
+              : site.status === 'offline' || site.status === 'critical'
               ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
               : 'bg-[#161616] text-neutral-400'
           }`}>
@@ -222,16 +182,16 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
                   ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
                   : site.status === 'warning'
                   ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                  : site.status === 'offline'
+                  : site.status === 'offline' || site.status === 'critical'
                   ? 'bg-rose-500 text-white font-bold'
                   : 'bg-[#161616] text-neutral-400 border border-[#222222]'
               }`}>
                 <span className={`w-1.5 h-1.5 rounded-full ${
                   site.status === 'online' ? 'bg-emerald-400' :
                   site.status === 'warning' ? 'bg-amber-400' :
-                  site.status === 'offline' ? 'bg-white animate-pulse' : 'bg-neutral-500'
+                  site.status === 'offline' || site.status === 'critical' ? 'bg-white animate-pulse' : 'bg-neutral-500'
                 }`} />
-                {site.status === 'online' ? 'ONLINE' : site.status === 'warning' ? 'ATENÇÃO' : site.status === 'offline' ? 'OFFLINE' : 'PAUSADO'}
+                {site.status === 'online' ? 'ONLINE' : site.status === 'warning' ? 'ATENÇÃO' : site.status === 'critical' ? 'CRÍTICO' : site.status === 'offline' ? 'OFFLINE' : site.status === 'paused' ? 'PAUSADO' : 'SEM DADOS'}
               </span>
             </div>
             <p className="text-[11px] text-neutral-400 mt-0.5 font-mono">
@@ -240,9 +200,9 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
           </div>
         </div>
 
-        {site.status === 'offline' && (
+        {(site.status === 'offline' || site.status === 'critical') && (
           <div className="px-2.5 py-1 rounded bg-rose-500/20 border border-rose-500/30 text-rose-300 text-xs font-mono">
-            Falha detectada: Servidor retornou HTTP 503
+            {site.checksHistory[0]?.result || (site.status === 'critical' ? `Erro crítico HTTP ${site.httpStatus}` : 'Falha real de conexão')}
           </div>
         )}
       </div>
@@ -259,7 +219,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
             <span className={`text-base font-bold font-mono uppercase ${
               site.status === 'online' ? 'text-emerald-400' :
               site.status === 'warning' ? 'text-amber-400' :
-              site.status === 'offline' ? 'text-rose-400' : 'text-neutral-400'
+              site.status === 'offline' || site.status === 'critical' ? 'text-rose-400' : 'text-neutral-400'
             }`}>
               {site.status}
             </span>
@@ -273,7 +233,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
           </span>
           <div className="mt-1.5">
             <span className="text-xl font-bold font-mono text-white">
-              {site.uptime30d.toFixed(2)}%
+              {site.uptime30d === null ? 'Sem dados' : `${site.uptime30d.toFixed(2)}%`}
             </span>
           </div>
         </div>
@@ -285,7 +245,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
           </span>
           <div className="mt-1.5">
             <span className="text-xl font-bold font-mono text-white">
-              {site.status === 'offline' ? '-' : `${site.responseTime.toFixed(2)}s`}
+              {site.responseTime === null ? 'Indisponível' : `${site.responseTime.toFixed(2)}s`}
             </span>
           </div>
         </div>
@@ -297,12 +257,12 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
           </span>
           <div className="mt-1.5">
             <span className={`text-xs font-bold font-mono block ${
-              site.sslDaysRemaining <= 15 ? 'text-amber-400' : 'text-emerald-400'
+              site.sslDaysRemaining !== null && site.sslDaysRemaining <= 15 ? 'text-amber-400' : 'text-neutral-400'
             }`}>
-              {site.sslValid ? 'Válido' : 'Inválido'}
+              {site.sslValid === null ? 'Indisponível' : site.sslValid ? 'Válido' : 'Inválido'}
             </span>
             <span className="text-[10px] font-mono text-neutral-400">
-              {site.sslDaysRemaining}d restantes
+              {site.sslDaysRemaining === null ? 'Não foi possível verificar' : `${site.sslDaysRemaining}d restantes`}
             </span>
           </div>
         </div>
@@ -314,10 +274,10 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
           </span>
           <div className="mt-1.5">
             <span className="text-xl font-bold font-mono text-white block">
-              {site.domainDaysRemaining}d
+              {site.domainDaysRemaining === null ? 'Indisponível' : `${site.domainDaysRemaining}d`}
             </span>
             <span className="text-[10px] font-mono text-neutral-400">
-              restantes
+              {site.domainDaysRemaining === null ? 'Não foi possível verificar' : 'restantes'}
             </span>
           </div>
         </div>
@@ -332,7 +292,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
               site.httpStatus === 200 ? 'text-emerald-400' :
               site.httpStatus === 503 || site.httpStatus === 500 ? 'text-rose-400 font-black' : 'text-neutral-300'
             }`}>
-              {site.httpStatus === 200 ? '200 OK' : site.httpStatus}
+              {site.httpStatus === null ? 'Indisponível' : site.httpStatus === 200 ? '200 OK' : site.httpStatus}
             </span>
           </div>
         </div>
@@ -346,35 +306,38 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
               Histórico de Disponibilidade Operacional
             </h3>
             <p className="text-[10px] text-neutral-500 mt-0.5">
-              Cada bloco representa a saúde em intervalos sucessivos
+              Cada bloco representa um check persistido
             </p>
           </div>
           <span className="text-xs font-mono font-bold text-emerald-400">
-            {site.uptime30d.toFixed(2)}% de disponibilidade
+            {site.uptime30d === null ? 'Sem dados suficientes' : `${site.uptime30d.toFixed(2)}% de disponibilidade`}
           </span>
         </div>
 
         <div className="flex items-center gap-1 overflow-x-auto py-1">
-          {uptimeBlocks.map((status, idx) => {
+          {uptimeBlocks.map((check, idx) => {
             const bg = {
               online: 'bg-emerald-500/80 hover:bg-emerald-400',
               warning: 'bg-amber-500/90 hover:bg-amber-400',
               offline: 'bg-rose-500 hover:bg-rose-400',
-              incident: 'bg-amber-500/70 hover:bg-amber-400'
-            }[status];
+              critical: 'bg-rose-500 hover:bg-rose-400'
+            }[check.status];
 
             return (
               <div
                 key={idx}
-                title={`Ponto de verificação ${idx + 1}: ${status}`}
+                title={`${check.timestamp}: ${check.status}`}
                 className={`h-6 flex-1 min-w-[5px] rounded-xs transition-colors cursor-pointer ${bg}`}
               />
             );
           })}
+          {uptimeBlocks.length === 0 && (
+            <span className="text-xs font-mono text-neutral-500">Sem dados suficientes.</span>
+          )}
         </div>
 
         <div className="flex items-center justify-between text-[9px] font-mono text-neutral-500 pt-0.5">
-          <span>90 dias atrás</span>
+          <span>Checks carregados</span>
           <span className="flex items-center gap-3">
             <span className="flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-xs bg-emerald-500" /> Operacional
@@ -421,6 +384,11 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
         </div>
 
         <div className="h-56 w-full pt-1">
+          {latencyData.length === 0 ? (
+            <div className="h-full flex items-center justify-center text-xs font-mono text-neutral-500">
+              Sem dados suficientes no período selecionado.
+            </div>
+          ) : (
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart data={latencyData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
               <defs>
@@ -453,6 +421,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
               />
             </AreaChart>
           </ResponsiveContainer>
+          )}
         </div>
       </div>
 
@@ -467,18 +436,17 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
               </h3>
             </div>
             <p className="text-[10px] text-neutral-400 mt-0.5 font-mono">
-              Última verificação de rastreamento: <strong className="text-neutral-200">{site.tracking?.lastCheckedAt || site.lastCheck || 'Hoje às 11:20'}</strong>
+              Última verificação de rastreamento: <strong className="text-neutral-200">Não foi possível verificar</strong>
             </p>
           </div>
 
           <button
-            onClick={handleVerifyTrackingClick}
-            disabled={isVerifyingTracking}
+            disabled
             className="px-3 py-1.5 text-xs font-medium text-neutral-200 bg-[#111111] hover:bg-[#1a1a1a] hover:text-white border border-[#222222] rounded transition-colors flex items-center gap-1.5 disabled:opacity-50 self-start sm:self-auto"
             title="Realizar novamente a análise de tags e integrações"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${isVerifyingTracking ? 'animate-spin text-white' : 'text-neutral-400'}`} />
-            {isVerifyingTracking ? 'Analisando tags...' : 'Verificar rastreamento'}
+            <RefreshCw className="w-3.5 h-3.5 text-neutral-500" />
+            Verificação indisponível
           </button>
         </div>
 
@@ -492,9 +460,10 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
             { key: 'searchConsole', title: 'Google Search Console' }
           ].map(({ key, title }) => {
             const toolRes = site.tracking?.results?.[key as keyof typeof site.tracking.results];
-            const status: TrackingStatusColor = toolRes?.status || 'gray';
-            const statusLabel = toolRes?.statusLabel || 'Não utilizado';
-            const displayId = toolRes?.foundId || toolRes?.expectedId;
+            const toolConfig = site.tracking?.[key as 'ga4' | 'gtm' | 'googleAds' | 'metaPixel' | 'searchConsole'];
+            const status = toolRes?.status || 'gray';
+            const statusLabel = toolRes?.statusLabel || (toolConfig?.enabled ? 'Não verificado' : 'Não configurado');
+            const displayId = toolRes?.foundId || toolRes?.expectedId || toolConfig?.expectedId;
 
             return (
               <div
@@ -547,11 +516,11 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
                 <div className="mt-2 pt-1.5 border-t border-[#161616]">
                   {key === 'searchConsole' ? (
                     <span className="text-[10px] font-mono text-neutral-400 block truncate">
-                      {status === 'green' ? 'Configurado' : status === 'yellow' ? 'Pendente' : 'Não utilizado'}
+                      {toolConfig?.enabled ? 'Configurado; não verificado' : 'Não configurado'}
                     </span>
                   ) : status === 'gray' ? (
                     <span className="text-[10px] font-mono text-neutral-600 block">
-                      Não configurado
+                      {toolConfig?.enabled ? (displayId || 'Configurado sem ID') : 'Não configurado'}
                     </span>
                   ) : status === 'yellow' && toolRes?.foundId && toolRes.expectedId && toolRes.foundId !== toolRes.expectedId ? (
                     <div className="space-y-0.5">
@@ -592,19 +561,19 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
           <div className="grid grid-cols-2 gap-2 text-[11px]">
             <div className="p-2 rounded bg-[#000000] border border-[#1e1e1e] flex items-center justify-between">
               <span className="text-neutral-400">Disponibilidade:</span>
-              <span className="text-emerald-400 font-mono font-medium">Ativo</span>
+              <span className="text-emerald-400 font-mono font-medium">Ativa</span>
             </div>
             <div className="p-2 rounded bg-[#000000] border border-[#1e1e1e] flex items-center justify-between">
               <span className="text-neutral-400">Tempo de resposta:</span>
-              <span className="text-emerald-400 font-mono font-medium">Ativo (&lt;3s)</span>
+              <span className="text-emerald-400 font-mono font-medium">Registrado</span>
             </div>
             <div className="p-2 rounded bg-[#000000] border border-[#1e1e1e] flex items-center justify-between">
               <span className="text-neutral-400">Certificado SSL:</span>
-              <span className="text-emerald-400 font-mono font-medium">Ativo</span>
+              <span className="text-neutral-500 font-mono font-medium">Indisponível</span>
             </div>
             <div className="p-2 rounded bg-[#000000] border border-[#1e1e1e] flex items-center justify-between">
               <span className="text-neutral-400">Domínio WHOIS:</span>
-              <span className="text-emerald-400 font-mono font-medium">Ativo</span>
+              <span className="text-neutral-500 font-mono font-medium">Indisponível</span>
             </div>
           </div>
         </div>
@@ -616,12 +585,12 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
           {site.monitorContent && site.expectedContentText ? (
             <div className="space-y-1.5">
               <p className="text-[11px] text-neutral-400">
-                O monitor verifica se o HTML retornado contém a expressão:
+                Expressão configurada (o coletor atual ainda não verifica o HTML):
               </p>
-              <div className="p-2 rounded bg-[#000000] border border-[#1e1e1e] font-mono text-xs text-emerald-300 flex items-center justify-between">
+              <div className="p-2 rounded bg-[#000000] border border-[#1e1e1e] font-mono text-xs text-neutral-300 flex items-center justify-between">
                 <span>"{site.expectedContentText}"</span>
-                <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-400">
-                  Encontrado
+                <span className="text-[9px] px-1.5 py-0.2 rounded bg-[#161616] text-neutral-400">
+                  Não verificado
                 </span>
               </div>
             </div>
@@ -640,7 +609,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
             Últimas verificações
           </h3>
           <span className="text-[10px] font-mono text-neutral-500">
-            Pings automáticos registrados
+            Checks registrados
           </span>
         </div>
 
@@ -665,12 +634,13 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
               ) : (
                 site.checksHistory.map((check) => {
                   const isOff = check.status === 'offline';
+                  const isCritical = check.status === 'critical';
                   const isWarn = check.status === 'warning';
 
                   return (
                     <tr 
                       key={check.id}
-                      className={isOff ? 'bg-rose-950/20' : isWarn ? 'bg-amber-950/15' : 'hover:bg-[#121212]'}
+                      className={isOff || isCritical ? 'bg-rose-950/20' : isWarn ? 'bg-amber-950/15' : 'hover:bg-[#121212]'}
                     >
                       <td className="py-2.5 px-3 text-neutral-300 font-semibold">{check.timestamp}</td>
                       <td className="py-2.5 px-3">
@@ -690,6 +660,12 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
                           <span className="text-rose-400 font-bold flex items-center gap-1.5">
                             <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />
                             Offline
+                          </span>
+                        )}
+                        {check.status === 'critical' && (
+                          <span className="text-rose-400 font-bold flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                            Crítico
                           </span>
                         )}
                       </td>

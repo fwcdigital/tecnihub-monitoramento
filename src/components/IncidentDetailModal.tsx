@@ -131,9 +131,9 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({
               </div>
 
               <div className="p-2.5 rounded bg-[#000000] border border-[#1e1e1e]">
-                <span className="text-[9px] font-mono uppercase text-neutral-500 block">Falhas Consecutivas</span>
+                <span className="text-[9px] font-mono uppercase text-neutral-500 block">Falhas carregadas</span>
                 <span className="text-xs font-mono font-bold text-rose-400 mt-0.5 block">
-                  {incident.failedChecksCount} tentativas
+                  {incident.failedChecksCount === null ? 'Indisponível' : `${incident.failedChecksCount} tentativas`}
                 </span>
               </div>
 

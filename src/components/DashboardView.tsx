@@ -20,11 +20,9 @@ import {
   Zap,
   Filter,
   Eye,
-  Tag,
   Globe
 } from 'lucide-react';
 import { Site, Incident, SiteStatus } from '../types';
-import { getTotalTrackingIssuesCount, getSiteTrackingIssues } from '../utils/trackingAnalyzer';
 
 interface DashboardViewProps {
   sites: Site[];
@@ -63,22 +61,24 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const totalSites = sites.length;
   const onlineSites = sites.filter(s => s.status === 'online').length;
   const warningSites = sites.filter(s => s.status === 'warning').length;
-  const offlineSites = sites.filter(s => s.status === 'offline').length;
+  const offlineSites = sites.filter(s => s.status === 'offline' || s.status === 'critical').length;
   const pausedSites = sites.filter(s => s.status === 'paused').length;
-  const totalTrackingIssues = getTotalTrackingIssuesCount(sites);
+  const uptimeValues = sites.map((site) => site.uptime30d).filter((value): value is number => value !== null);
+  const avgUptime = uptimeValues.length
+    ? (uptimeValues.reduce((sum, value) => sum + value, 0) / uptimeValues.length).toFixed(2)
+    : null;
 
-  const avgUptime = (
-    sites.reduce((acc, s) => acc + s.uptime30d, 0) / (totalSites || 1)
-  ).toFixed(2);
-
-  const activeResponseSites = sites.filter(s => s.status !== 'offline' && s.status !== 'paused');
-  const avgResponseTime = (
-    activeResponseSites.reduce((acc, s) => acc + s.responseTime, 0) / (activeResponseSites.length || 1)
-  ).toFixed(2);
+  const responseValues = sites.map((site) => site.responseTime).filter((value): value is number => value !== null);
+  const avgResponseTime = responseValues.length
+    ? (responseValues.reduce((sum, value) => sum + value, 0) / responseValues.length).toFixed(2)
+    : null;
 
   // Critical offline site detection
-  const offlineSite = sites.find(s => s.status === 'offline');
+  const offlineSite = sites.find(s => s.status === 'offline' || s.status === 'critical');
   const activeWarningSites = sites.filter(s => s.status === 'warning');
+  const latestGlobalCheck = sites
+    .flatMap((site) => site.checksHistory)
+    .sort((a, b) => new Date(b.checkedAt).getTime() - new Date(a.checkedAt).getTime())[0];
 
   // Filter & Prioritize Sorting:
   // 1. Offline -> 2. Warning -> 3. Online -> 4. Paused
@@ -86,7 +86,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     return sites
       .filter((s) => {
         // Status filter
-        if (statusFilter !== 'all' && s.status !== statusFilter) return false;
+        if (
+          statusFilter !== 'all' &&
+          !(statusFilter === 'offline' && (s.status === 'offline' || s.status === 'critical')) &&
+          s.status !== statusFilter
+        ) return false;
         // Search query
         if (searchQuery.trim()) {
           const q = searchQuery.toLowerCase();
@@ -101,10 +105,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       })
       .sort((a, b) => {
         const priorityOrder: Record<SiteStatus, number> = {
-          offline: 1,
-          warning: 2,
-          online: 3,
-          paused: 4
+          critical: 1,
+          offline: 2,
+          warning: 3,
+          online: 4,
+          unknown: 5,
+          paused: 6
         };
         return priorityOrder[a.status] - priorityOrder[b.status];
       });
@@ -154,7 +160,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         {/* SITES MONITORADOS */}
         <div className="p-3 rounded bg-[#0a0a0a] border border-[#1e1e1e] flex flex-col justify-between">
           <span className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 font-semibold">
-            Sites Monitorados
+            Sites Cadastrados
           </span>
           <div className="mt-1.5 flex items-baseline justify-between">
             <span className="text-xl sm:text-2xl font-bold font-mono text-white">{totalSites}</span>
@@ -204,7 +210,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <span className={`text-[10px] font-mono uppercase tracking-wider font-semibold ${
               offlineSites > 0 ? 'text-rose-400' : 'text-neutral-400'
             }`}>
-              Fora do Ar
+              Crítico / Offline
             </span>
             {offlineSites > 0 && (
               <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-ping"></span>
@@ -226,7 +232,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             Uptime Médio
           </span>
           <div className="mt-1.5 flex items-baseline justify-between">
-            <span className="text-xl sm:text-2xl font-bold font-mono text-white">{avgUptime}%</span>
+            <span className="text-xl sm:text-2xl font-bold font-mono text-white">{avgUptime === null ? 'Sem dados' : `${avgUptime}%`}</span>
             <span className="text-[9px] font-mono text-neutral-500">30 dias</span>
           </div>
         </div>
@@ -237,7 +243,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             Tempo Resposta
           </span>
           <div className="mt-1.5 flex items-baseline justify-between">
-            <span className="text-xl sm:text-2xl font-bold font-mono text-white">{avgResponseTime}s</span>
+            <span className="text-xl sm:text-2xl font-bold font-mono text-white">{avgResponseTime === null ? 'Sem dados' : `${avgResponseTime}s`}</span>
             <span className="text-[9px] font-mono text-neutral-500">Média</span>
           </div>
         </div>
@@ -258,14 +264,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     Alerta Crítico Operacional
                   </span>
                   <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-rose-500 text-white font-bold">
-                    HTTP {offlineSite.httpStatus}
+                    HTTP {offlineSite.httpStatus ?? 'Indisponível'}
                   </span>
                 </div>
                 <h3 className="text-sm font-semibold text-white mt-0.5">
-                  {offlineSite.client} — {offlineSite.domain} está fora do ar
+                  {offlineSite.client} — {offlineSite.domain} requer atenção imediata
                 </h3>
                 <p className="text-xs text-neutral-300 mt-0.5 font-mono">
-                  O servidor retornou HTTP 503 ({offlineSite.consecutiveFailures} falhas consecutivas). Verificado há 1 minuto.
+                  {offlineSite.checksHistory[0]?.result || 'Não foi possível obter o resultado do check'} ({offlineSite.consecutiveFailures} falha(s) consecutiva(s) nos checks carregados).
                 </p>
               </div>
             </div>
@@ -309,19 +315,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </strong> fora do ar
             </span>
             <span className="text-neutral-700 hidden sm:inline">•</span>
-            <span className="flex items-center gap-1.5 text-neutral-300 font-mono text-[10px]">
-              <Tag className="w-3 h-3 text-neutral-400" />
-              <span>Rastreamento: </span>
-              {totalTrackingIssues > 0 ? (
-                <strong className="text-amber-400 font-semibold">{totalTrackingIssues} divergência{totalTrackingIssues > 1 ? 's' : ''}</strong>
-              ) : (
-                <strong className="text-emerald-400 font-semibold">100% OK</strong>
-              )}
-            </span>
+            <span className="text-neutral-500 font-mono text-[10px]">Tracking: indisponível</span>
           </div>
 
           <span className="text-[10px] font-mono text-neutral-500">
-            Última varredura global: há 42 segundos
+            Último check: {latestGlobalCheck?.timestamp || 'Sem dados suficientes'}
           </span>
         </div>
       </div>
@@ -445,15 +443,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     ) : (
                     filteredAndSortedSites.map((site) => {
                       const isOffline = site.status === 'offline';
+                      const isCritical = site.status === 'critical';
                       const isWarning = site.status === 'warning';
                       const isPaused = site.status === 'paused';
-                      const trackingIssues = getSiteTrackingIssues(site);
 
                       return (
                         <tr
                           key={site.id}
                           className={`hover:bg-[#121212] transition-colors group cursor-pointer ${
-                            isOffline ? 'bg-rose-950/20' : isWarning ? 'bg-amber-950/15' : ''
+                            isOffline || isCritical ? 'bg-rose-950/20' : isWarning ? 'bg-amber-950/15' : ''
                           }`}
                           onClick={() => onSelectSite(site)}
                         >
@@ -464,15 +462,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                               <span className="text-[9px] font-mono px-1 py-0.2 rounded bg-[#161616] text-neutral-400 border border-[#222222]">
                                 {site.hosting}
                               </span>
-                              {trackingIssues.length > 0 && (
-                                <span
-                                  title={`Rastreamento: ${trackingIssues.map(i => `${i.toolName} (${i.statusLabel})`).join(', ')}`}
-                                  className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 flex items-center gap-1"
-                                >
-                                  <Tag className="w-2.5 h-2.5" />
-                                  {trackingIssues.length} {trackingIssues.length === 1 ? 'tag' : 'tags'}
-                                </span>
-                              )}
                             </div>
                           </td>
 
@@ -503,24 +492,36 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                                 Offline
                               </span>
                             )}
+                            {site.status === 'critical' && (
+                              <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-rose-400 font-mono">
+                                <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                                Crítico ({site.httpStatus})
+                              </span>
+                            )}
                             {site.status === 'paused' && (
                               <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-neutral-500 font-mono">
                                 <span className="w-1.5 h-1.5 rounded-full bg-neutral-600" />
                                 Pausado
                               </span>
                             )}
+                            {site.status === 'unknown' && (
+                              <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-neutral-500 font-mono">
+                                <span className="w-1.5 h-1.5 rounded-full bg-neutral-600" />
+                                Sem dados
+                              </span>
+                            )}
                           </td>
 
                           {/* Uptime */}
                           <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
-                            <span className={site.uptime30d < 99.0 ? 'text-amber-400 font-bold' : 'text-neutral-200'}>
-                              {site.uptime30d.toFixed(2)}%
+                            <span className={site.uptime30d !== null && site.uptime30d < 99.0 ? 'text-amber-400 font-bold' : 'text-neutral-200'}>
+                              {site.uptime30d === null ? 'Sem dados' : `${site.uptime30d.toFixed(2)}%`}
                             </span>
                           </td>
 
                           {/* Resposta */}
                           <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
-                            {isOffline ? (
+                            {isOffline || site.responseTime === null ? (
                               <span className="text-neutral-500">-</span>
                             ) : (
                               <span className={site.responseTime > 3.0 ? 'text-amber-400 font-bold' : 'text-neutral-200'}>
@@ -531,15 +532,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
                           {/* SSL */}
                           <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
-                            <span className={site.sslDaysRemaining <= 15 ? 'text-amber-400 font-bold' : 'text-neutral-400'}>
-                              {site.sslDaysRemaining}d
+                            <span className={site.sslDaysRemaining !== null && site.sslDaysRemaining <= 15 ? 'text-amber-400 font-bold' : 'text-neutral-400'}>
+                              {site.sslDaysRemaining === null ? 'Indisponível' : `${site.sslDaysRemaining}d`}
                             </span>
                           </td>
 
                           {/* Domínio */}
                           <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
-                            <span className={site.domainDaysRemaining <= 15 ? 'text-amber-400 font-bold' : 'text-neutral-400'}>
-                              {site.domainDaysRemaining}d
+                            <span className={site.domainDaysRemaining !== null && site.domainDaysRemaining <= 15 ? 'text-amber-400 font-bold' : 'text-neutral-400'}>
+                              {site.domainDaysRemaining === null ? 'Indisponível' : `${site.domainDaysRemaining}d`}
                             </span>
                           </td>
 
@@ -622,12 +623,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                                       {isPaused ? (
                                         <>
                                           <PlayCircle className="w-3.5 h-3.5 text-emerald-400" />
-                                          Retomar monitoramento
+                                          Reativar monitoramento
                                         </>
                                       ) : (
                                         <>
                                           <PauseCircle className="w-3.5 h-3.5 text-amber-400" />
-                                          Pausar monitoramento
+                                          Desativar monitoramento
                                         </>
                                       )}
                                     </button>
@@ -670,11 +671,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </p>
             </div>
             <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#161616] text-neutral-400 font-semibold border border-[#222222]">
-              Tempo Real
+              Dados persistidos
             </span>
           </div>
 
           <div className="space-y-2">
+            {recentIncidents.length === 0 && (
+              <div className="p-5 rounded border border-[#1e1e1e] bg-[#0a0a0a] text-center text-[11px] font-mono text-neutral-500">
+                Sem incidentes registrados.
+              </div>
+            )}
             {recentIncidents.map((incident) => {
               const isCrit = incident.severity === 'critical';
               const isResolved = incident.status === 'resolved';

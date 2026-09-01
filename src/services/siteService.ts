@@ -1,24 +1,45 @@
-import { supabase, isSupabaseConfigured } from './supabaseClient';
-import { Site, CheckRecord, Incident, DbSite, DbCheck, DbIncident, HostingProvider, MonitoringFrequency } from '../types';
+import {
+  Site,
+  CheckRecord,
+  DbSite,
+  DbCheck,
+  DbIncident,
+  Incident,
+  IncidentType,
+  HostingProvider,
+  MonitoringFrequency
+} from '../types';
 
-/**
- * Formata um timestamp ISO ou data para hora legível
- */
-function formatTimestamp(isoString: string): string {
-  try {
-    const date = new Date(isoString);
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  } catch {
-    return 'Agora';
+async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    ...init,
+    credentials: 'same-origin',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(init?.headers || {})
+    }
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (response.status === 401 && typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('tecnihub:session-expired'));
+    }
+    const error = new Error(payload.error || `Falha na API (HTTP ${response.status})`) as Error & {
+      code?: string;
+      details?: unknown;
+    };
+    error.code = payload.code;
+    error.details = payload.history;
+    throw error;
   }
+  return payload as T;
 }
 
-/**
- * Formata data/hora completa para histórico
- */
 function formatFullDate(isoString: string): string {
   try {
     const date = new Date(isoString);
+    if (!Number.isFinite(date.getTime())) return 'Indisponível';
     const day = String(date.getDate()).padStart(2, '0');
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const hours = String(date.getHours()).padStart(2, '0');
@@ -30,66 +51,56 @@ function formatFullDate(isoString: string): string {
   }
 }
 
-/**
- * Formata tempo relativo simples
- */
 function formatRelativeTime(isoString: string): string {
   try {
-    const now = Date.now();
-    const diff = now - new Date(isoString).getTime();
-    const mins = Math.floor(diff / 60000);
+    const parsedTime = new Date(isoString).getTime();
+    if (!Number.isFinite(parsedTime)) return 'Indisponível';
+    const mins = Math.floor((Date.now() - parsedTime) / 60000);
     if (mins < 1) return 'Há instantes';
     if (mins === 1) return 'Há 1 min';
     if (mins < 60) return `Há ${mins} min`;
     const hours = Math.floor(mins / 60);
     if (hours === 1) return 'Há 1 hora';
     if (hours < 24) return `Há ${hours} horas`;
-    return 'Hoje';
+    const days = Math.floor(hours / 24);
+    return days === 1 ? 'Há 1 dia' : `Há ${days} dias`;
   } catch {
     return 'Recente';
   }
 }
 
-/**
- * Converte registro do banco de dados (DbSite + DbChecks) para a interface Site da aplicação
- */
-export function mapDbSiteToSite(dbSite: DbSite, checks: DbCheck[] = [], activeIncident?: DbIncident | null): Site {
-  const latestCheck = checks.length > 0 ? checks[0] : null;
-
-  // Converte tempo de resposta para segundos com 2 casas decimais
-  const latestResponseSeconds = latestCheck?.response_time 
-    ? +(latestCheck.response_time / 1000).toFixed(2) 
-    : 0.85;
-
+export function mapDbSiteToSite(
+  dbSite: DbSite,
+  checks: DbCheck[] = [],
+  activeIncident?: DbIncident | null,
+  uptimeCounts?: { totalChecks: number; availableChecks: number }
+): Site {
+  const latestCheck = checks[0] || null;
+  const latestResponseSeconds = latestCheck?.response_time !== null && latestCheck?.response_time !== undefined
+    ? +(latestCheck.response_time / 1000).toFixed(2)
+    : null;
   const validResponseTimes = checks
-    .filter(c => c.response_time && c.response_time > 0)
-    .map(c => Number(c.response_time) / 1000);
+    .filter((check) => check.response_time && check.response_time > 0)
+    .map((check) => Number(check.response_time) / 1000);
+  const avgResponseSeconds = validResponseTimes.length
+    ? +(validResponseTimes.reduce((sum, value) => sum + value, 0) / validResponseTimes.length).toFixed(2)
+    : null;
+  const uptime = uptimeCounts?.totalChecks
+    ? +((uptimeCounts.availableChecks / uptimeCounts.totalChecks) * 100).toFixed(2)
+    : null;
 
-  const avgResponseSeconds = validResponseTimes.length > 0
-    ? +(validResponseTimes.reduce((a, b) => a + b, 0) / validResponseTimes.length).toFixed(2)
-    : latestResponseSeconds;
+  let currentStatus: Site['status'] = 'unknown';
+  if (!dbSite.is_active) currentStatus = 'paused';
+  else if (latestCheck) currentStatus = latestCheck.status;
 
-  // Calcula taxa de uptime aproximada dos últimos checks
-  const totalChecks = checks.length;
-  const successfulChecks = checks.filter(c => c.status === 'online').length;
-  const uptime = totalChecks > 0 ? +((successfulChecks / totalChecks) * 100).toFixed(2) : 100.0;
-
-  // Define status atual
-  let currentStatus: Site['status'] = 'online';
-  if (!dbSite.is_active) {
-    currentStatus = 'paused';
-  } else if (latestCheck) {
-    currentStatus = latestCheck.status;
-  }
-
-  // Mapeia histórico de checks
-  const checksHistory: CheckRecord[] = checks.map(c => ({
-    id: c.id,
-    timestamp: formatFullDate(c.checked_at),
-    status: c.status,
-    httpCode: c.http_status ?? (c.status === 'offline' ? 'ERR' : 200),
-    responseTime: c.response_time ? +(c.response_time / 1000).toFixed(2) : 0,
-    result: c.error_message || (c.http_status ? `HTTP ${c.http_status} OK` : 'Servidor respondendo')
+  const checksHistory: CheckRecord[] = checks.map((check) => ({
+    id: check.id,
+    timestamp: formatFullDate(check.checked_at),
+    checkedAt: check.checked_at,
+    status: check.status,
+    httpCode: check.http_status ?? (check.status === 'offline' ? 'ERR' : 'Indisponível'),
+    responseTime: check.response_time ? +(check.response_time / 1000).toFixed(2) : 0,
+    result: check.error_message || (check.http_status !== null ? `HTTP ${check.http_status}` : 'Sem detalhe disponível')
   }));
 
   return {
@@ -104,22 +115,26 @@ export function mapDbSiteToSite(dbSite: DbSite, checks: DbCheck[] = [], activeIn
     isWordPress: dbSite.is_wordpress,
     isActive: dbSite.is_active,
     uptime30d: uptime,
-    responseTime: currentStatus === 'offline' ? 0 : latestResponseSeconds,
+    responseTime: latestCheck && currentStatus !== 'offline' ? latestResponseSeconds : null,
     avgResponseTime: avgResponseSeconds,
-    sslValid: true,
-    sslDaysRemaining: 85,
-    domainDaysRemaining: 240,
+    // These collectors do not exist in the MVP yet. Null is intentional: the UI
+    // must never turn absent telemetry into an invented operational value.
+    sslValid: null,
+    sslDaysRemaining: null,
+    domainDaysRemaining: null,
     lastCheck: latestCheck ? formatRelativeTime(latestCheck.checked_at) : 'Aguardando',
-    httpStatus: latestCheck?.http_status ?? (currentStatus === 'offline' ? 503 : 200),
+    httpStatus: latestCheck?.http_status ?? (latestCheck?.status === 'offline' ? 'ERR' : null),
     monitorAvailability: true,
     monitorResponseTime: true,
-    monitorSsl: true,
-    monitorDomain: true,
+    monitorSsl: false,
+    monitorDomain: false,
     monitorRedirects: true,
     monitorContent: Boolean(dbSite.expected_content),
     expectedContentText: dbSite.expected_content || '',
-    consecutiveFailures: currentStatus === 'offline' ? 1 : 0,
-    createdAt: dbSite.created_at ? dbSite.created_at.slice(0, 10) : new Date().toISOString().slice(0, 10),
+    consecutiveFailures: checks.findIndex((check) => check.status !== 'offline' && check.status !== 'critical') === -1
+      ? checks.length
+      : checks.findIndex((check) => check.status !== 'offline' && check.status !== 'critical'),
+    createdAt: dbSite.created_at?.slice(0, 10) || 'Indisponível',
     updatedAt: dbSite.updated_at,
     activeIncidentId: activeIncident?.id,
     checksHistory,
@@ -129,240 +144,169 @@ export function mapDbSiteToSite(dbSite: DbSite, checks: DbCheck[] = [], activeIn
       googleAds: { enabled: Boolean(dbSite.expected_google_ads_id), expectedId: dbSite.expected_google_ads_id || '' },
       metaPixel: { enabled: Boolean(dbSite.expected_meta_pixel_id), expectedId: dbSite.expected_meta_pixel_id || '' },
       searchConsole: { enabled: dbSite.uses_search_console, searchConsoleConfigured: dbSite.uses_search_console },
-      rdStation: { enabled: dbSite.uses_rd_station, expectedId: dbSite.uses_rd_station ? 'Ativo' : '' },
-      lastCheckedAt: latestCheck ? formatRelativeTime(latestCheck.checked_at) : 'Pendente'
+      rdStation: { enabled: dbSite.uses_rd_station, expectedId: '' },
+      lastCheckedAt: undefined
     }
   };
 }
 
-/**
- * Busca todos os sites do Supabase com seus respectivos últimos checks
- */
 export async function getSitesFromDatabase(): Promise<Site[]> {
-  if (!supabase || !isSupabaseConfigured()) {
-    return [];
-  }
-
-  // 1. Busca todos os sites
-  const { data: dbSites, error: sitesError } = await supabase
-    .from('sites')
-    .select('*')
-    .order('created_at', { ascending: false });
-
-  if (sitesError || !dbSites) {
-    console.error('[SiteService] Erro ao buscar sites:', sitesError);
-    return [];
-  }
-
-  if (dbSites.length === 0) {
-    return [];
-  }
-
-  // 2. Busca os últimos checks para cada site
-  const siteIds = dbSites.map(s => s.id);
-  const { data: allChecks, error: checksError } = await supabase
-    .from('checks')
-    .select('*')
-    .in('site_id', siteIds)
-    .order('checked_at', { ascending: false });
-
-  if (checksError) {
-    console.warn('[SiteService] Aviso ao buscar checks:', checksError);
-  }
-
-  // 3. Busca incidentes ativos
-  const { data: activeIncidents } = await supabase
-    .from('incidents')
-    .select('*')
-    .in('site_id', siteIds)
-    .eq('status', 'active');
-
-  const checksBySiteId: Record<string, DbCheck[]> = {};
-  (allChecks || []).forEach((c: DbCheck) => {
-    if (!checksBySiteId[c.site_id]) {
-      checksBySiteId[c.site_id] = [];
-    }
-    if (checksBySiteId[c.site_id].length < 20) {
-      checksBySiteId[c.site_id].push(c);
-    }
-  });
-
-  const incidentBySiteId: Record<string, DbIncident> = {};
-  (activeIncidents || []).forEach((inc: DbIncident) => {
-    incidentBySiteId[inc.site_id] = inc;
-  });
-
-  return dbSites.map(dbSite => {
-    return mapDbSiteToSite(
-      dbSite as DbSite,
-      checksBySiteId[dbSite.id] || [],
-      incidentBySiteId[dbSite.id] || null
-    );
-  });
+  const response = await apiRequest<{
+    sites: Array<{
+      site: DbSite;
+      checks: DbCheck[];
+      activeIncident: DbIncident | null;
+      uptime30d: { totalChecks: number; availableChecks: number };
+    }>;
+  }>('/api/sites');
+  return response.sites.map((entry) =>
+    mapDbSiteToSite(entry.site, entry.checks, entry.activeIncident, entry.uptime30d)
+  );
 }
 
-/**
- * Cria um novo site no Supabase
- */
-export async function createSiteInDatabase(siteData: Partial<Site>): Promise<Site | null> {
-  if (!supabase || !isSupabaseConfigured()) {
-    throw new Error('Supabase não está configurado. Preencha as variáveis no arquivo .env.');
-  }
+function formatIncidentDuration(startedAt: string, resolvedAt?: string | null): string {
+  const start = new Date(startedAt).getTime();
+  const end = resolvedAt ? new Date(resolvedAt).getTime() : Date.now();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 'Indisponível';
+  const minutes = Math.floor((end - start) / 60_000);
+  if (minutes < 1) return 'Menos de 1 minuto';
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 24) return remainingMinutes ? `${hours}h ${remainingMinutes}min` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
+}
 
-  const newSitePayload = {
-    client_name: siteData.client || 'Cliente TECNIHUB',
-    name: siteData.siteName || 'Novo Site',
-    url: siteData.url || 'https://tecnihub.com.br',
-    domain: siteData.domain || 'tecnihub.com.br',
-    hosting_provider: siteData.hosting || 'Hostinger',
+export function mapDbIncidentToIncident(dbIncident: DbIncident, sites: Site[]): Incident {
+  const site = sites.find((candidate) => candidate.id === dbIncident.site_id);
+  const relevantChecks = site?.checksHistory || [];
+  const startedAtMs = new Date(dbIncident.started_at).getTime();
+  const resolvedAtMs = dbIncident.resolved_at ? new Date(dbIncident.resolved_at).getTime() : Number.POSITIVE_INFINITY;
+  const incidentChecks = relevantChecks.filter((check) => {
+    const checkedAtMs = new Date(check.checkedAt).getTime();
+    return checkedAtMs >= startedAtMs && checkedAtMs <= resolvedAtMs;
+  });
+  const failureChecks = incidentChecks.filter(
+    (check) => check.status === 'offline' || check.status === 'critical'
+  );
+  const firstFailure = [...failureChecks]
+    .reverse()
+    .find(Boolean);
+  const lastSuccess = incidentChecks.find((check) => check.status === 'online')
+    || relevantChecks.find((check) => check.status === 'online');
+  const latestCheck = relevantChecks[0];
+  const incidentFailure = failureChecks[0];
+
+  return {
+    id: dbIncident.id,
+    siteId: dbIncident.site_id,
+    client: site?.client || 'Site não encontrado',
+    siteName: site?.siteName || 'Cadastro indisponível',
+    url: site?.url || '',
+    type: dbIncident.type as IncidentType,
+    severity: dbIncident.severity,
+    status: dbIncident.status,
+    startedAt: dbIncident.started_at,
+    createdAt: formatFullDate(dbIncident.started_at),
+    duration: formatIncidentDuration(dbIncident.started_at, dbIncident.resolved_at),
+    resolvedAt: dbIncident.resolved_at ? formatFullDate(dbIncident.resolved_at) : undefined,
+    resolvedAtIso: dbIncident.resolved_at || undefined,
+    httpReturned: incidentFailure?.httpCode ?? 'Indisponível',
+    failedChecksCount: failureChecks.length || null,
+    lastSuccessfulCheck: lastSuccess?.timestamp || 'Sem registro disponível',
+    firstErrorCheck: firstFailure?.timestamp || 'Sem registro disponível',
+    currentStatus: dbIncident.status === 'resolved'
+      ? 'Resolvido'
+      : latestCheck?.result || 'Incidente ativo; aguardando nova verificação',
+    explanation: dbIncident.description || dbIncident.title
+  };
+}
+
+export async function getIncidentsFromDatabase(sites: Site[]): Promise<Incident[]> {
+  const response = await apiRequest<{ incidents: DbIncident[] }>('/api/incidents');
+  return response.incidents.map((incident) => mapDbIncidentToIncident(incident, sites));
+}
+
+export async function resolveIncidentInDatabase(incidentId: string): Promise<DbIncident> {
+  const response = await apiRequest<{ incident: DbIncident }>(`/api/incidents/${encodeURIComponent(incidentId)}/resolve`, {
+    method: 'PATCH',
+    body: JSON.stringify({})
+  });
+  return response.incident;
+}
+
+function mapSiteToPayload(siteData: Partial<Site>) {
+  return {
+    client_name: siteData.client,
+    name: siteData.siteName,
+    url: siteData.url,
+    domain: siteData.domain,
+    hosting_provider: siteData.hosting,
     is_wordpress: Boolean(siteData.isWordPress),
-    is_active: true,
-    check_interval: siteData.frequency || '5min',
+    check_interval: siteData.frequency,
     expected_content: siteData.expectedContentText || null,
     expected_ga4_id: siteData.tracking?.ga4?.expectedId || null,
     expected_gtm_id: siteData.tracking?.gtm?.expectedId || null,
     expected_google_ads_id: siteData.tracking?.googleAds?.expectedId || null,
     expected_meta_pixel_id: siteData.tracking?.metaPixel?.expectedId || null,
-    uses_search_console: Boolean(siteData.tracking?.searchConsole?.enabled),
+    uses_search_console: Boolean(siteData.tracking?.searchConsole?.searchConsoleConfigured),
     uses_rd_station: Boolean(siteData.tracking?.rdStation?.enabled)
   };
+}
 
-  const { data, error } = await supabase
-    .from('sites')
-    .insert(newSitePayload)
-    .select('*')
-    .single();
+export async function createSiteInDatabase(siteData: Partial<Site>): Promise<Site | null> {
+  const { site } = await apiRequest<{ site: DbSite }>('/api/sites', {
+    method: 'POST',
+    body: JSON.stringify(mapSiteToPayload(siteData))
+  });
 
-  if (error || !data) {
-    console.error('[SiteService] Erro ao cadastrar site:', error);
-    throw new Error(error?.message || 'Falha ao cadastrar site no banco.');
-  }
-
-  // Dispara uma verificação inicial automática pelo backend
   try {
-    await checkSiteNow(data.id, data.url);
-  } catch (err) {
-    console.warn('[SiteService] Verificação inicial falhou:', err);
+    await checkSiteNow(site.id);
+  } catch (error) {
+    // The site write succeeded. Keep that outcome unambiguous even if the
+    // first monitoring attempt cannot be persisted yet.
+    console.warn('[SiteService] Site criado, mas a verificação inicial falhou:', error);
   }
-
-  // Recarrega o site recém-criado com seu check
-  const checks = await getChecksForSite(data.id);
-  return mapDbSiteToSite(data as DbSite, checks);
+  try {
+    const sites = await getSitesFromDatabase();
+    return sites.find((candidate) => candidate.id === site.id) || mapDbSiteToSite(site);
+  } catch (error) {
+    console.warn('[SiteService] Site criado, mas a recarga da listagem falhou:', error);
+    return mapDbSiteToSite(site);
+  }
 }
 
-/**
- * Atualiza os dados de um site no Supabase
- */
 export async function updateSiteInDatabase(siteId: string, siteData: Partial<Site>): Promise<boolean> {
-  if (!supabase || !isSupabaseConfigured()) {
-    throw new Error('Supabase não está configurado.');
-  }
-
-  const updatePayload: Record<string, any> = {};
-  if (siteData.client) updatePayload.client_name = siteData.client;
-  if (siteData.siteName) updatePayload.name = siteData.siteName;
-  if (siteData.url) updatePayload.url = siteData.url;
-  if (siteData.domain) updatePayload.domain = siteData.domain;
-  if (siteData.hosting) updatePayload.hosting_provider = siteData.hosting;
-  if (siteData.isWordPress !== undefined) updatePayload.is_wordpress = siteData.isWordPress;
-  if (siteData.frequency) updatePayload.check_interval = siteData.frequency;
-  if (siteData.expectedContentText !== undefined) updatePayload.expected_content = siteData.expectedContentText || null;
-
-  if (siteData.tracking) {
-    updatePayload.expected_ga4_id = siteData.tracking.ga4?.expectedId || null;
-    updatePayload.expected_gtm_id = siteData.tracking.gtm?.expectedId || null;
-    updatePayload.expected_google_ads_id = siteData.tracking.googleAds?.expectedId || null;
-    updatePayload.expected_meta_pixel_id = siteData.tracking.metaPixel?.expectedId || null;
-    updatePayload.uses_search_console = Boolean(siteData.tracking.searchConsole?.enabled);
-    updatePayload.uses_rd_station = Boolean(siteData.tracking.rdStation?.enabled);
-  }
-
-  const { error } = await supabase
-    .from('sites')
-    .update(updatePayload)
-    .eq('id', siteId);
-
-  if (error) {
-    console.error('[SiteService] Erro ao atualizar site:', error);
-    throw new Error(error.message);
-  }
-
+  await apiRequest(`/api/sites/${encodeURIComponent(siteId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(mapSiteToPayload(siteData))
+  });
   return true;
 }
 
-/**
- * Exclui um site do Supabase
- */
-export async function deleteSiteFromDatabase(siteId: string): Promise<boolean> {
-  if (!supabase || !isSupabaseConfigured()) {
-    throw new Error('Supabase não está configurado.');
-  }
-
-  const { error } = await supabase
-    .from('sites')
-    .delete()
-    .eq('id', siteId);
-
-  if (error) {
-    console.error('[SiteService] Erro ao excluir site:', error);
-    throw new Error(error.message);
-  }
-
+export async function deleteSiteFromDatabase(siteId: string, confirmation: string): Promise<boolean> {
+  await apiRequest(`/api/sites/${encodeURIComponent(siteId)}`, {
+    method: 'DELETE',
+    body: JSON.stringify({ confirmation })
+  });
   return true;
 }
 
-/**
- * Alterna entre pausar e retomar o monitoramento de um site
- */
 export async function togglePauseSiteInDatabase(siteId: string, currentIsActive: boolean): Promise<boolean> {
-  if (!supabase || !isSupabaseConfigured()) {
-    throw new Error('Supabase não está configurado.');
-  }
-
-  const { error } = await supabase
-    .from('sites')
-    .update({ is_active: !currentIsActive })
-    .eq('id', siteId);
-
-  if (error) {
-    console.error('[SiteService] Erro ao alternar status do site:', error);
-    throw new Error(error.message);
-  }
-
+  await apiRequest(`/api/sites/${encodeURIComponent(siteId)}/active`, {
+    method: 'PATCH',
+    body: JSON.stringify({ isActive: !currentIsActive })
+  });
   return true;
 }
 
-/**
- * Busca os checks históricos de um site específico
- */
-export async function getChecksForSite(siteId: string, limit = 20): Promise<DbCheck[]> {
-  if (!supabase || !isSupabaseConfigured()) {
-    return [];
-  }
-
-  const { data, error } = await supabase
-    .from('checks')
-    .select('*')
-    .eq('site_id', siteId)
-    .order('checked_at', { ascending: false })
-    .limit(limit);
-
-  if (error || !data) {
-    return [];
-  }
-
-  return data as DbCheck[];
-}
-
-/**
- * Executa uma verificação HTTP imediata pelo backend
- */
-export async function checkSiteNow(siteId: string, url?: string): Promise<{
+export async function checkSiteNow(siteId: string): Promise<{
   success: boolean;
   siteId?: string;
   checkId?: string;
   result: {
-    status: 'online' | 'warning' | 'offline';
+    status: 'online' | 'warning' | 'critical' | 'offline';
     httpStatus: number | null;
     responseTime: number;
     finalUrl: string;
@@ -372,38 +316,15 @@ export async function checkSiteNow(siteId: string, url?: string): Promise<{
   };
   checkedAt: string;
 }> {
-  const response = await fetch('/api/check-site', {
+  return apiRequest('/api/check-site', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ siteId, url })
+    body: JSON.stringify({ siteId })
   });
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `Falha na requisição backend (HTTP ${response.status})`);
-  }
-
-  return await response.json();
 }
 
-/**
- * Executa verificação em todos os sites pelo backend
- */
-export async function checkAllSitesNow(sites?: Array<{ id: string; url: string; name: string }>): Promise<any> {
-  const response = await fetch('/api/check-all', {
+export async function checkAllSitesNow(): Promise<any> {
+  return apiRequest('/api/check-all', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ sites })
+    body: JSON.stringify({})
   });
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData.error || `Falha na varredura global (HTTP ${response.status})`);
-  }
-
-  return await response.json();
 }

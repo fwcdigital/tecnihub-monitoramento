@@ -1,12 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { X, Globe, Server, Clock, Shield, Search, Check, AlertCircle, Tag, Radio } from 'lucide-react';
 import { Site, HostingProvider, MonitoringFrequency, SiteTrackingConfig } from '../types';
-import { analyzeSiteTracking, createDefaultTrackingConfig } from '../utils/trackingAnalyzer';
 
 interface AddEditSiteModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (siteData: Partial<Site>) => void;
+  onSave: (siteData: Partial<Site>) => Promise<boolean> | boolean;
   siteToEdit?: Site | null;
   isSaving?: boolean;
 }
@@ -29,30 +28,30 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
   // Toggles
   const [monitorAvailability, setMonitorAvailability] = useState(true);
   const [monitorResponseTime, setMonitorResponseTime] = useState(true);
-  const [monitorSsl, setMonitorSsl] = useState(true);
-  const [monitorDomain, setMonitorDomain] = useState(true);
+  const [monitorSsl, setMonitorSsl] = useState(false);
+  const [monitorDomain, setMonitorDomain] = useState(false);
   const [monitorRedirects, setMonitorRedirects] = useState(true);
   const [monitorContent, setMonitorContent] = useState(false);
   const [expectedContentText, setExpectedContentText] = useState('');
 
   // Rastreamento (Tracking) Form State
-  const [ga4Enabled, setGa4Enabled] = useState(true);
-  const [ga4ExpectedId, setGa4ExpectedId] = useState('G-');
+  const [ga4Enabled, setGa4Enabled] = useState(false);
+  const [ga4ExpectedId, setGa4ExpectedId] = useState('');
   
-  const [gtmEnabled, setGtmEnabled] = useState(true);
-  const [gtmExpectedId, setGtmExpectedId] = useState('GTM-');
+  const [gtmEnabled, setGtmEnabled] = useState(false);
+  const [gtmExpectedId, setGtmExpectedId] = useState('');
   
-  const [googleAdsEnabled, setGoogleAdsEnabled] = useState(true);
-  const [googleAdsExpectedId, setGoogleAdsExpectedId] = useState('AW-');
+  const [googleAdsEnabled, setGoogleAdsEnabled] = useState(false);
+  const [googleAdsExpectedId, setGoogleAdsExpectedId] = useState('');
   
   const [metaPixelEnabled, setMetaPixelEnabled] = useState(false);
   const [metaPixelExpectedId, setMetaPixelExpectedId] = useState('');
   
   const [rdStationEnabled, setRdStationEnabled] = useState(false);
-  const [rdStationExpectedId, setRdStationExpectedId] = useState('dms.rdstation.com.br');
+  const [rdStationExpectedId, setRdStationExpectedId] = useState('');
 
-  const [searchConsoleEnabled, setSearchConsoleEnabled] = useState(true);
-  const [searchConsoleConfigured, setSearchConsoleConfigured] = useState(true);
+  const [searchConsoleEnabled, setSearchConsoleEnabled] = useState(false);
+  const [searchConsoleConfigured, setSearchConsoleConfigured] = useState(false);
 
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -90,8 +89,8 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
         setRdStationEnabled(siteToEdit.tracking.rdStation?.enabled ?? false);
         setRdStationExpectedId(siteToEdit.tracking.rdStation?.expectedId || '');
 
-        setSearchConsoleEnabled(siteToEdit.tracking.searchConsole?.enabled ?? true);
-        setSearchConsoleConfigured(siteToEdit.tracking.searchConsole?.searchConsoleConfigured ?? true);
+        setSearchConsoleEnabled(siteToEdit.tracking.searchConsole?.enabled ?? false);
+        setSearchConsoleConfigured(siteToEdit.tracking.searchConsole?.searchConsoleConfigured ?? false);
       }
     } else {
       setClient('');
@@ -103,16 +102,16 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
       setFrequency('5min');
       setMonitorAvailability(true);
       setMonitorResponseTime(true);
-      setMonitorSsl(true);
-      setMonitorDomain(true);
+      setMonitorSsl(false);
+      setMonitorDomain(false);
       setMonitorRedirects(true);
       setMonitorContent(false);
       setExpectedContentText('');
 
       // Defaults for new site
-      setGa4Enabled(true);
+      setGa4Enabled(false);
       setGa4ExpectedId('');
-      setGtmEnabled(true);
+      setGtmEnabled(false);
       setGtmExpectedId('');
       setGoogleAdsEnabled(false);
       setGoogleAdsExpectedId('');
@@ -120,8 +119,8 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
       setMetaPixelExpectedId('');
       setRdStationEnabled(false);
       setRdStationExpectedId('');
-      setSearchConsoleEnabled(true);
-      setSearchConsoleConfigured(true);
+      setSearchConsoleEnabled(false);
+      setSearchConsoleConfigured(false);
     }
     setErrors({});
   }, [siteToEdit, isOpen]);
@@ -141,7 +140,7 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
     }
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const newErrors: Record<string, string> = {};
 
@@ -166,15 +165,12 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
       metaPixel: { enabled: metaPixelEnabled, expectedId: metaPixelExpectedId.trim() },
       rdStation: { enabled: rdStationEnabled, expectedId: rdStationExpectedId.trim() },
       searchConsole: { enabled: searchConsoleEnabled, searchConsoleConfigured },
-      lastCheckedAt: siteToEdit?.tracking?.lastCheckedAt || 'Agora mesmo',
-      lastCheckTimestamp: siteToEdit?.tracking?.lastCheckTimestamp || Date.now(),
-      results: siteToEdit?.tracking?.results
+      lastCheckedAt: undefined,
+      lastCheckTimestamp: undefined,
+      results: undefined
     };
 
-    // Analyze tracking against inputs
-    const analyzedTracking = analyzeSiteTracking(trackingConfig);
-
-    onSave({
+    const saved = await onSave({
       client: client.trim(),
       siteName: siteName.trim(),
       url: url.trim(),
@@ -189,9 +185,9 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
       monitorRedirects,
       monitorContent,
       expectedContentText: monitorContent ? expectedContentText.trim() : '',
-      tracking: analyzedTracking
+      tracking: trackingConfig
     });
-    onClose();
+    if (saved) onClose();
   };
 
   if (!isOpen) return null;
@@ -376,12 +372,12 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
                 <input
                   type="checkbox"
                   checked={monitorAvailability}
-                  onChange={(e) => setMonitorAvailability(e.target.checked)}
+                  disabled
                   className="mt-0.5 rounded bg-[#111111] border-[#333333] text-white focus:ring-0"
                 />
                 <div>
                   <span className="text-xs font-medium text-neutral-200 block">Monitorar disponibilidade</span>
-                  <span className="text-[10px] text-neutral-500">Pings contínuos e verificação HTTP</span>
+                  <span className="text-[10px] text-neutral-500">Verificação HTTP disponível</span>
                 </div>
               </label>
 
@@ -389,12 +385,12 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
                 <input
                   type="checkbox"
                   checked={monitorResponseTime}
-                  onChange={(e) => setMonitorResponseTime(e.target.checked)}
+                  disabled
                   className="mt-0.5 rounded bg-[#111111] border-[#333333] text-white focus:ring-0"
                 />
                 <div>
                   <span className="text-xs font-medium text-neutral-200 block">Monitorar tempo de resposta</span>
-                  <span className="text-[10px] text-neutral-500">Alertar se ultrapassar 3,0 segundos</span>
+                  <span className="text-[10px] text-neutral-500">Tempo real registrado em cada check</span>
                 </div>
               </label>
 
@@ -402,12 +398,12 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
                 <input
                   type="checkbox"
                   checked={monitorSsl}
-                  onChange={(e) => setMonitorSsl(e.target.checked)}
+                  disabled
                   className="mt-0.5 rounded bg-[#111111] border-[#333333] text-white focus:ring-0"
                 />
                 <div>
                   <span className="text-xs font-medium text-neutral-200 block">Monitorar certificado SSL</span>
-                  <span className="text-[10px] text-neutral-500">Validade e contagem regressiva de expiração</span>
+                  <span className="text-[10px] text-neutral-500">Indisponível no coletor atual</span>
                 </div>
               </label>
 
@@ -415,12 +411,12 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
                 <input
                   type="checkbox"
                   checked={monitorDomain}
-                  onChange={(e) => setMonitorDomain(e.target.checked)}
+                  disabled
                   className="mt-0.5 rounded bg-[#111111] border-[#333333] text-white focus:ring-0"
                 />
                 <div>
                   <span className="text-xs font-medium text-neutral-200 block">Monitorar domínio (WHOIS)</span>
-                  <span className="text-[10px] text-neutral-500">Vencimento de registro do domínio .br / .com</span>
+                  <span className="text-[10px] text-neutral-500">Indisponível no coletor atual</span>
                 </div>
               </label>
 
@@ -428,12 +424,12 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
                 <input
                   type="checkbox"
                   checked={monitorRedirects}
-                  onChange={(e) => setMonitorRedirects(e.target.checked)}
+                  disabled
                   className="mt-0.5 rounded bg-[#111111] border-[#333333] text-white focus:ring-0"
                 />
                 <div>
                   <span className="text-xs font-medium text-neutral-200 block">Monitorar redirecionamentos</span>
-                  <span className="text-[10px] text-neutral-500">Detectar loops 301/302 ou desvios indevidos</span>
+                  <span className="text-[10px] text-neutral-500">Redirect final registrado pelo check HTTP</span>
                 </div>
               </label>
 
@@ -441,12 +437,12 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
                 <input
                   type="checkbox"
                   checked={monitorContent}
-                  onChange={(e) => setMonitorContent(e.target.checked)}
+                  disabled
                   className="mt-0.5 rounded bg-[#111111] border-[#333333] text-white focus:ring-0"
                 />
                 <div>
                   <span className="text-xs font-medium text-neutral-200 block">Verificação de conteúdo</span>
-                  <span className="text-[10px] text-neutral-500">Checar presença de texto obrigatório no HTML</span>
+                  <span className="text-[10px] text-neutral-500">Indisponível; configuração existente é preservada</span>
                 </div>
               </label>
             </div>
@@ -461,7 +457,7 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
               </div>
               <p className="text-[10px] text-neutral-400 leading-relaxed">
                 Informe um termo ou trecho de texto que deve obrigatoriamente existir na resposta. 
-                Se o site responder HTTP 200 mas esse texto desaparecer, um alerta será gerado.
+                O valor é preservado no cadastro, mas o coletor atual ainda não verifica o HTML.
               </p>
               <input
                 type="text"
@@ -628,17 +624,8 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
                   <span className="text-[10px] font-mono text-neutral-500">Inbound & Leads</span>
                 </div>
                 {rdStationEnabled && (
-                  <div className="pt-1.5 pl-6 border-t border-[#161616]">
-                    <label className="block text-[10px] font-mono text-neutral-400 mb-1">
-                      Token / Script RD esperado:
-                    </label>
-                    <input
-                      type="text"
-                      value={rdStationExpectedId}
-                      onChange={(e) => setRdStationExpectedId(e.target.value)}
-                      placeholder="dms.rdstation.com.br ou token público"
-                      className="w-full px-2 py-1 bg-[#0a0a0a] border border-[#2a2a2a] rounded text-xs text-white placeholder-neutral-700 font-mono focus:outline-none focus:border-neutral-500"
-                    />
+                  <div className="pt-1.5 pl-6 border-t border-[#161616] text-[10px] font-mono text-neutral-500">
+                    Uso registrado; identificador e verificação indisponíveis no schema atual.
                   </div>
                 )}
               </div>

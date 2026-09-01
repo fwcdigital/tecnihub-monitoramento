@@ -66,7 +66,7 @@ export const SitesView: React.FC<SitesViewProps> = ({
         return true;
       })
       .sort((a, b) => {
-        const priority: Record<SiteStatus, number> = { offline: 1, warning: 2, online: 3, paused: 4 };
+        const priority: Record<SiteStatus, number> = { critical: 1, offline: 2, warning: 3, online: 4, unknown: 5, paused: 6 };
         return priority[a.status] - priority[b.status];
       });
   }, [sites, statusFilter, hostingFilter, searchQuery]);
@@ -80,10 +80,10 @@ export const SitesView: React.FC<SitesViewProps> = ({
       `"${s.domain}"`,
       `"${s.hosting}"`,
       s.status,
-      `${s.uptime30d}%`,
-      `${s.responseTime}s`,
-      s.sslDaysRemaining,
-      s.domainDaysRemaining
+      s.uptime30d === null ? 'Sem dados' : `${s.uptime30d}%`,
+      s.responseTime === null ? 'Sem dados' : `${s.responseTime}s`,
+      s.sslDaysRemaining ?? 'Indisponível',
+      s.domainDaysRemaining ?? 'Indisponível'
     ]);
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
     const encodedUri = encodeURI(csvContent);
@@ -153,6 +153,7 @@ export const SitesView: React.FC<SitesViewProps> = ({
             <option value="all">Todos os Status</option>
             <option value="online">Online</option>
             <option value="warning">Atenção</option>
+            <option value="critical">Crítico</option>
             <option value="offline">Offline</option>
             <option value="paused">Pausado</option>
           </select>
@@ -217,6 +218,7 @@ export const SitesView: React.FC<SitesViewProps> = ({
                 ) : (
                 filteredSites.map((site) => {
                   const isOffline = site.status === 'offline';
+                  const isCritical = site.status === 'critical';
                   const isWarning = site.status === 'warning';
                   const isPaused = site.status === 'paused';
 
@@ -224,7 +226,7 @@ export const SitesView: React.FC<SitesViewProps> = ({
                     <tr
                       key={site.id}
                       className={`hover:bg-[#121212] transition-colors group cursor-pointer ${
-                        isOffline ? 'bg-rose-950/20' : isWarning ? 'bg-amber-950/15' : ''
+                        isOffline || isCritical ? 'bg-rose-950/20' : isWarning ? 'bg-amber-950/15' : ''
                       }`}
                       onClick={() => onSelectSite(site)}
                     >
@@ -264,7 +266,13 @@ export const SitesView: React.FC<SitesViewProps> = ({
                         {site.status === 'offline' && (
                           <span className="inline-flex items-center gap-1.5 font-semibold text-rose-400">
                             <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse" />
-                            Offline (503)
+                            Offline
+                          </span>
+                        )}
+                        {site.status === 'critical' && (
+                          <span className="inline-flex items-center gap-1.5 font-semibold text-rose-400">
+                            <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                            Crítico ({site.httpStatus})
                           </span>
                         )}
                         {site.status === 'paused' && (
@@ -273,18 +281,24 @@ export const SitesView: React.FC<SitesViewProps> = ({
                             Pausado
                           </span>
                         )}
+                        {site.status === 'unknown' && (
+                          <span className="inline-flex items-center gap-1.5 font-medium text-neutral-500">
+                            <span className="w-1.5 h-1.5 rounded-full bg-neutral-600" />
+                            Sem dados
+                          </span>
+                        )}
                       </td>
 
                       {/* Uptime */}
                       <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
-                        <span className={site.uptime30d < 99.0 ? 'text-amber-400 font-bold' : 'text-neutral-200'}>
-                          {site.uptime30d.toFixed(2)}%
+                        <span className={site.uptime30d !== null && site.uptime30d < 99.0 ? 'text-amber-400 font-bold' : 'text-neutral-200'}>
+                          {site.uptime30d === null ? 'Sem dados' : `${site.uptime30d.toFixed(2)}%`}
                         </span>
                       </td>
 
                       {/* Resposta */}
                       <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
-                        {isOffline ? (
+                        {isOffline || site.responseTime === null ? (
                           <span className="text-neutral-500">-</span>
                         ) : (
                           <span className={site.responseTime > 3.0 ? 'text-amber-400 font-bold' : 'text-neutral-200'}>
@@ -295,15 +309,15 @@ export const SitesView: React.FC<SitesViewProps> = ({
 
                       {/* SSL */}
                       <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
-                        <span className={site.sslDaysRemaining <= 15 ? 'text-amber-400 font-bold' : 'text-neutral-400'}>
-                          {site.sslDaysRemaining}d
+                        <span className={site.sslDaysRemaining !== null && site.sslDaysRemaining <= 15 ? 'text-amber-400 font-bold' : 'text-neutral-400'}>
+                          {site.sslDaysRemaining === null ? 'Indisponível' : `${site.sslDaysRemaining}d`}
                         </span>
                       </td>
 
                       {/* Domínio */}
                       <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
-                        <span className={site.domainDaysRemaining <= 15 ? 'text-amber-400 font-bold' : 'text-neutral-400'}>
-                          {site.domainDaysRemaining}d
+                        <span className={site.domainDaysRemaining !== null && site.domainDaysRemaining <= 15 ? 'text-amber-400 font-bold' : 'text-neutral-400'}>
+                          {site.domainDaysRemaining === null ? 'Indisponível' : `${site.domainDaysRemaining}d`}
                         </span>
                       </td>
 
@@ -381,12 +395,12 @@ export const SitesView: React.FC<SitesViewProps> = ({
                                   {isPaused ? (
                                     <>
                                       <PlayCircle className="w-3.5 h-3.5 text-emerald-400" />
-                                      Retomar
+                                      Reativar monitoramento
                                     </>
                                   ) : (
                                     <>
                                       <PauseCircle className="w-3.5 h-3.5 text-amber-400" />
-                                      Pausar
+                                      Desativar monitoramento
                                     </>
                                   )}
                                 </button>

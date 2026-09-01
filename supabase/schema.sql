@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS public.checks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   site_id UUID NOT NULL REFERENCES public.sites(id) ON DELETE CASCADE,
   checked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  status TEXT NOT NULL CHECK (status IN ('online', 'warning', 'offline')),
+  status TEXT NOT NULL CHECK (status IN ('online', 'warning', 'critical', 'offline')),
   http_status INTEGER,
   response_time NUMERIC(10, 2), -- tempo de resposta em milissegundos
   final_url TEXT,
@@ -90,31 +90,19 @@ CREATE TRIGGER trigger_sites_updated_at
 
 -- ==============================================================================
 -- HABILITAÇÃO DE ROW LEVEL SECURITY (RLS)
--- Como é uma ferramenta de monitoramento interna da TECNIHUB, permitimos
--- acesso a leitura e gravação das tabelas pelos clientes autenticados / anon.
+-- O frontend não acessa estas tabelas diretamente. Toda operação administrativa
+-- passa pelo backend autenticado com a service role.
 -- ==============================================================================
 ALTER TABLE public.sites ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.checks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.incidents ENABLE ROW LEVEL SECURITY;
 
--- Políticas de acesso irrestrito para chave anon/authenticated da TECNIHUB
-CREATE POLICY "Permitir select total em sites" ON public.sites FOR SELECT USING (true);
-CREATE POLICY "Permitir insert em sites" ON public.sites FOR INSERT WITH CHECK (true);
-CREATE POLICY "Permitir update em sites" ON public.sites FOR UPDATE USING (true);
-CREATE POLICY "Permitir delete em sites" ON public.sites FOR DELETE USING (true);
+-- Sem policies para anon/authenticated: RLS nega acesso direto por padrão.
+REVOKE ALL ON TABLE public.sites FROM anon, authenticated;
+REVOKE ALL ON TABLE public.checks FROM anon, authenticated;
+REVOKE ALL ON TABLE public.incidents FROM anon, authenticated;
 
-CREATE POLICY "Permitir select total em checks" ON public.checks FOR SELECT USING (true);
-CREATE POLICY "Permitir insert em checks" ON public.checks FOR INSERT WITH CHECK (true);
-CREATE POLICY "Permitir update em checks" ON public.checks FOR UPDATE USING (true);
-CREATE POLICY "Permitir delete em checks" ON public.checks FOR DELETE USING (true);
-
-CREATE POLICY "Permitir select total em incidents" ON public.incidents FOR SELECT USING (true);
-CREATE POLICY "Permitir insert em incidents" ON public.incidents FOR INSERT WITH CHECK (true);
-CREATE POLICY "Permitir update em incidents" ON public.incidents FOR UPDATE USING (true);
-CREATE POLICY "Permitir delete em incidents" ON public.incidents FOR DELETE USING (true);
-
--- Concessão de permissões de tabela no PostgreSQL para os roles da API
-GRANT ALL ON TABLE public.sites TO anon, authenticated, service_role;
-GRANT ALL ON TABLE public.checks TO anon, authenticated, service_role;
-GRANT ALL ON TABLE public.incidents TO anon, authenticated, service_role;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated, service_role;
+GRANT ALL ON TABLE public.sites TO service_role;
+GRANT ALL ON TABLE public.checks TO service_role;
+GRANT ALL ON TABLE public.incidents TO service_role;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO service_role;

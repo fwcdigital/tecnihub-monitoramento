@@ -11,7 +11,11 @@ console.log('--- TESTANDO CONEXÃO DETALHADA COM O SUPABASE ---');
 console.log('URL:', url);
 
 async function testWithKey(label: string, key: string) {
-  console.log(`\nTestando com ${label} (${key.slice(0, 15)}...):`);
+  if (!key) {
+    console.log(`\n${label}: não configurada.`);
+    return;
+  }
+  console.log(`\nTestando com ${label}:`);
   const client = createClient(url, key);
   
   const resSites = await client.from('sites').select('*').limit(1);

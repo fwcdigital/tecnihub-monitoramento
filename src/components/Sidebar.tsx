@@ -9,7 +9,8 @@ import {
   Radio, 
   ChevronRight,
   ShieldCheck,
-  X
+  X,
+  LogOut
 } from 'lucide-react';
 import { NavigationTab } from '../types';
 import { TecnihubLogo } from './TecnihubLogo';
@@ -20,9 +21,15 @@ interface SidebarProps {
   activeIncidentsCount: number;
   offlineCount: number;
   warningCount: number;
+  onlineCount: number;
+  pausedCount: number;
+  unknownCount: number;
   totalSitesCount: number;
   isOpenMobile: boolean;
   onCloseMobile: () => void;
+  adminEmail: string;
+  onLogout: () => void;
+  isLoggingOut: boolean;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -31,9 +38,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
   activeIncidentsCount,
   offlineCount,
   warningCount,
+  onlineCount,
+  pausedCount,
+  unknownCount,
   totalSitesCount,
   isOpenMobile,
-  onCloseMobile
+  onCloseMobile,
+  adminEmail,
+  onLogout,
+  isLoggingOut
 }) => {
   const menuItems = [
     {
@@ -131,7 +144,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </span>
           </div>
           <span className="text-[9px] font-mono text-neutral-400 px-1 py-0.2 rounded bg-[#121212] border border-[#222222]">
-            v2.4.0
+            MVP
           </span>
         </div>
 
@@ -174,15 +187,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <span className="text-[10px] font-mono font-semibold text-neutral-400 uppercase tracking-wider">
               Status Geral
             </span>
-            {offlineCount === 0 && warningCount === 0 ? (
-              <span className="inline-flex items-center gap-1 text-[9px] text-emerald-400 font-mono">
-                <ShieldCheck className="w-2.5 h-2.5" />
-                100% OK
+            {totalSitesCount === 0 ? (
+              <span className="inline-flex items-center gap-1 text-[9px] text-neutral-500 font-mono">
+                Sem sites
               </span>
-            ) : (
+            ) : offlineCount > 0 || warningCount > 0 ? (
               <span className="inline-flex items-center gap-1 text-[9px] text-amber-400 font-mono">
                 <Radio className="w-2.5 h-2.5 animate-pulse" />
                 Atenção
+              </span>
+            ) : unknownCount > 0 ? (
+              <span className="inline-flex items-center gap-1 text-[9px] text-neutral-400 font-mono">
+                Dados pendentes
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-[9px] text-emerald-400 font-mono">
+                <ShieldCheck className="w-2.5 h-2.5" />
+                Sem falhas ativas
               </span>
             )}
           </div>
@@ -193,7 +214,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
                 Operacionais
               </span>
-              <span className="font-bold text-emerald-400">{totalSitesCount - offlineCount - warningCount}</span>
+              <span className="font-bold text-emerald-400">{onlineCount}</span>
             </div>
             {warningCount > 0 && (
               <div className="flex justify-between items-center text-neutral-300">
@@ -213,6 +234,18 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 <span className="font-bold text-rose-400">{offlineCount}</span>
               </div>
             )}
+            {pausedCount > 0 && (
+              <div className="flex justify-between items-center text-neutral-300">
+                <span>Pausados</span>
+                <span className="font-bold text-neutral-400">{pausedCount}</span>
+              </div>
+            )}
+            {unknownCount > 0 && (
+              <div className="flex justify-between items-center text-neutral-300">
+                <span>Sem dados</span>
+                <span className="font-bold text-neutral-400">{unknownCount}</span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -224,9 +257,19 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </div>
             <div className="truncate">
               <p className="text-[11px] font-semibold text-neutral-200 truncate">Equipe Tecnihub</p>
-              <p className="text-[9px] text-neutral-500 font-mono truncate">operacao@tecnihub.com.br</p>
+              <p className="text-[9px] text-neutral-500 font-mono truncate">{adminEmail}</p>
             </div>
           </div>
+          <button
+            type="button"
+            onClick={onLogout}
+            disabled={isLoggingOut}
+            className="p-1.5 rounded text-neutral-500 hover:text-white hover:bg-[#181818] disabled:opacity-50 transition-colors"
+            title="Sair do painel"
+            aria-label="Sair do painel"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+          </button>
         </div>
       </aside>
     </>

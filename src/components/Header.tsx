@@ -38,7 +38,7 @@ export const Header: React.FC<HeaderProps> = ({
   const [notificationsOpen, setNotificationsOpen] = useState(false);
 
   const tabTitles: Record<NavigationTab, { title: string; subtitle: string }> = {
-    dashboard: { title: 'Dashboard Geral', subtitle: 'Visão operacional em tempo real' },
+    dashboard: { title: 'Dashboard Geral', subtitle: 'Dados operacionais persistidos' },
     sites: { title: 'Todos os Sites', subtitle: 'Inventário completo de domínios e serviços' },
     incidents: { title: 'Incidentes', subtitle: 'Histórico e anomalias ativas' },
     alerts: { title: 'Alertas & Canais', subtitle: 'Regras de notificação e gatilhos' },
@@ -118,7 +118,7 @@ export const Header: React.FC<HeaderProps> = ({
                 <span className="text-[11px] font-bold text-white uppercase tracking-wider font-mono">
                   Ocorrências Ativas ({activeIncidents.length})
                 </span>
-                <span className="text-[9px] font-mono text-neutral-500">Tempo Real</span>
+                <span className="text-[9px] font-mono text-neutral-500">Atualização periódica</span>
               </div>
 
               <div className="max-h-72 overflow-y-auto divide-y divide-[#1a1a1a] text-xs">

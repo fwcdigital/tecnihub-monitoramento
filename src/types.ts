@@ -1,4 +1,4 @@
-export type SiteStatus = 'online' | 'warning' | 'offline' | 'paused';
+export type SiteStatus = 'online' | 'warning' | 'critical' | 'offline' | 'paused' | 'unknown';
 
 export type IncidentSeverity = 'critical' | 'warning' | 'info';
 
@@ -9,7 +9,8 @@ export type MonitoringFrequency = '5min' | '15min' | '30min' | '1hour' | 'daily'
 export interface CheckRecord {
   id: string;
   timestamp: string;
-  status: 'online' | 'warning' | 'offline';
+  checkedAt: string;
+  status: 'online' | 'warning' | 'critical' | 'offline';
   httpCode: number | string;
   responseTime: number; // in seconds
   result: string;
@@ -63,14 +64,14 @@ export interface Site {
   hosting: HostingProvider;
   frequency: MonitoringFrequency;
   status: SiteStatus;
-  uptime30d: number; // percentage, e.g. 99.98
-  responseTime: number; // current/last in seconds e.g. 0.84
-  avgResponseTime: number; // average
-  sslValid: boolean;
-  sslDaysRemaining: number;
-  domainDaysRemaining: number;
+  uptime30d: number | null;
+  responseTime: number | null;
+  avgResponseTime: number | null;
+  sslValid: boolean | null;
+  sslDaysRemaining: number | null;
+  domainDaysRemaining: number | null;
   lastCheck: string; // relative or ISO
-  httpStatus: number | string; // e.g. 200, 503, 500, 'ERR'
+  httpStatus: number | string | null;
 
   // Monitoring toggles
   monitorAvailability: boolean;
@@ -121,7 +122,7 @@ export interface DbCheck {
   id: string;
   site_id: string;
   checked_at: string;
-  status: 'online' | 'warning' | 'offline';
+  status: 'online' | 'warning' | 'critical' | 'offline';
   http_status: number | null;
   response_time: number | null;
   final_url?: string | null;
@@ -172,11 +173,13 @@ export interface Incident {
   type: IncidentType;
   severity: IncidentSeverity;
   status: 'active' | 'resolved';
+  startedAt: string;
   createdAt: string;
   duration: string;
   resolvedAt?: string;
+  resolvedAtIso?: string;
   httpReturned: number | string;
-  failedChecksCount: number;
+  failedChecksCount: number | null;
   lastSuccessfulCheck: string;
   firstErrorCheck: string;
   currentStatus: string;

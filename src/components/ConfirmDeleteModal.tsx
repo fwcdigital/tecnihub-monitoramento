@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Trash2, X, AlertTriangle } from 'lucide-react';
 import { Site } from '../types';
 
@@ -6,7 +6,7 @@ interface ConfirmDeleteModalProps {
   isOpen: boolean;
   site: Site | null;
   onClose: () => void;
-  onConfirm: (siteId: string) => Promise<void> | void;
+  onConfirm: (siteId: string, confirmation: string) => Promise<void> | void;
   isDeleting?: boolean;
 }
 
@@ -17,7 +17,14 @@ export const ConfirmDeleteModal: React.FC<ConfirmDeleteModalProps> = ({
   onConfirm,
   isDeleting = false
 }) => {
+  const [confirmation, setConfirmation] = useState('');
+
+  useEffect(() => {
+    setConfirmation('');
+  }, [isOpen, site?.id]);
+
   if (!isOpen || !site) return null;
+  const confirmationMatches = confirmation.trim().toLowerCase() === site.domain.toLowerCase();
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-xs">
@@ -43,7 +50,7 @@ export const ConfirmDeleteModal: React.FC<ConfirmDeleteModalProps> = ({
         {/* Content */}
         <div className="p-4 space-y-3">
           <p className="text-xs text-neutral-300">
-            Tem certeza que deseja remover o monitoramento do site abaixo?
+            Esta ação tenta excluir definitivamente o cadastro abaixo. Para manter o histórico, prefira desativar o monitoramento.
           </p>
 
           <div className="p-3 rounded bg-[#000000] border border-[#1e1e1e] space-y-1">
@@ -57,8 +64,23 @@ export const ConfirmDeleteModal: React.FC<ConfirmDeleteModalProps> = ({
           </div>
 
           <p className="text-[11px] text-rose-400/90 font-mono bg-rose-950/20 border border-rose-900/30 p-2.5 rounded">
-            ⚠️ Esta ação é irreversível e excluirá permanentemente o histórico de verificações, métricas e ocorrências vinculadas a este site.
+            A exclusão será bloqueada se já existirem checks ou incidentes, evitando perda silenciosa de histórico.
           </p>
+
+          <div className="space-y-1.5">
+            <label className="block text-[11px] text-neutral-300 font-mono">
+              Para confirmar, digite <strong className="text-white">{site.domain}</strong>
+            </label>
+            <input
+              type="text"
+              value={confirmation}
+              onChange={(event) => setConfirmation(event.target.value)}
+              disabled={isDeleting}
+              autoComplete="off"
+              className="w-full px-2.5 py-1.5 bg-[#000000] border border-[#333333] rounded text-xs text-white placeholder-neutral-600 focus:outline-none focus:border-neutral-500 font-mono disabled:opacity-50"
+              placeholder={site.domain}
+            />
+          </div>
         </div>
 
         {/* Actions */}
@@ -73,12 +95,12 @@ export const ConfirmDeleteModal: React.FC<ConfirmDeleteModalProps> = ({
           </button>
           <button
             type="button"
-            onClick={() => onConfirm(site.id)}
-            disabled={isDeleting}
+            onClick={() => onConfirm(site.id, confirmation.trim())}
+            disabled={isDeleting || !confirmationMatches}
             className="px-3.5 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-50"
           >
             <Trash2 className="w-3.5 h-3.5" />
-            {isDeleting ? 'Excluindo...' : 'Sim, Excluir Site'}
+            {isDeleting ? 'Excluindo...' : 'Excluir Definitivamente'}
           </button>
         </div>
       </div>

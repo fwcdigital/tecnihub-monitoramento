@@ -1,187 +1,205 @@
 import dns from 'dns/promises';
-import { URL } from 'url';
+import net from 'node:net';
+import { URL } from 'node:url';
 
-/**
- * Verifica se um endereço IPv4 está dentro de faixas privadas, reservadas ou de loopback.
- */
-function isPrivateIPv4(ip: string): boolean {
-  const parts = ip.split('.').map(Number);
-  if (parts.length !== 4 || parts.some(isNaN)) return true;
+const DEFAULT_DNS_TIMEOUT_MS = 5000;
 
-  const [b0, b1, b2, b3] = parts;
+export type SSRFErrorType =
+  | 'INVALID_URL'
+  | 'UNSUPPORTED_PROTOCOL'
+  | 'SSRF_BLOCKED_HOST'
+  | 'SSRF_BLOCKED_IP'
+  | 'DNS_NOT_FOUND'
+  | 'DNS_TIMEOUT'
+  | 'DNS_ERROR';
 
-  // 0.0.0.0/8 (Rede atual)
-  if (b0 === 0) return true;
-
-  // 127.0.0.0/8 (Loopback / Localhost)
-  if (b0 === 127) return true;
-
-  // 10.0.0.0/8 (Privado Classe A)
-  if (b0 === 10) return true;
-
-  // 172.16.0.0/12 (Privado Classe B)
-  if (b0 === 172 && b1 >= 16 && b1 <= 31) return true;
-
-  // 192.168.0.0/16 (Privado Classe C)
-  if (b0 === 192 && b1 === 168) return true;
-
-  // 169.254.0.0/16 (Link-Local / Metadata AWS, GCP, Azure 169.254.169.254)
-  if (b0 === 169 && b1 === 254) return true;
-
-  // 100.64.0.0/10 (Carrier-grade NAT)
-  if (b0 === 100 && b1 >= 64 && b1 <= 127) return true;
-
-  // 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 (Documentação e testes)
-  if (b0 === 192 && b1 === 0 && b2 === 2) return true;
-  if (b0 === 198 && b1 === 51 && b2 === 100) return true;
-  if (b0 === 203 && b1 === 0 && b2 === 113) return true;
-
-  // 224.0.0.0/4 (Multicast)
-  if (b0 >= 224 && b0 <= 239) return true;
-
-  // 240.0.0.0/4 (Reservado para uso futuro / broadcast)
-  if (b0 >= 240) return true;
-
-  return false;
-}
-
-/**
- * Verifica se um endereço IPv6 é privado, local ou reservado.
- */
-function isPrivateIPv6(ip: string): boolean {
-  const lower = ip.toLowerCase();
-
-  // Loopback e Não especificado
-  if (lower === '::1' || lower === '::' || lower === '0:0:0:0:0:0:0:1') return true;
-
-  // IPv4 mapeado em IPv6 (::ffff:127.0.0.1)
-  if (lower.startsWith('::ffff:')) {
-    const ipv4 = lower.replace('::ffff:', '');
-    return isPrivateIPv4(ipv4);
-  }
-
-  // Unique Local (fc00::/7)
-  if (lower.startsWith('fc') || lower.startsWith('fd')) return true;
-
-  // Link-Local (fe80::/10)
-  if (lower.startsWith('fe8') || lower.startsWith('fe9') || lower.startsWith('fea') || lower.startsWith('feb')) return true;
-
-  // Multicast (ff00::/8)
-  if (lower.startsWith('ff')) return true;
-
-  return false;
+export interface ResolvedAddress {
+  address: string;
+  family: 4 | 6;
 }
 
 export interface SSRFValidationResult {
   valid: boolean;
+  errorType?: SSRFErrorType;
   error?: string;
-  resolvedIp?: string;
+  resolvedAddresses?: ResolvedAddress[];
 }
 
-/**
- * Validação rigorosa contra SSRF (Server-Side Request Forgery).
- * 1. Valida se a URL é http/https.
- * 2. Bloqueia hostnames locais explícitos (localhost, internal, metadata).
- * 3. Resolve DNS do host e verifica se o IP pertence a faixas privadas/reservadas.
- */
-export async function validateUrlForSSRF(urlString: string): Promise<SSRFValidationResult> {
+type DnsLookup = (
+  hostname: string,
+  options: { all: true; verbatim: true }
+) => Promise<Array<{ address: string; family: number }>>;
+
+export function normalizeHttpUrl(input: string): string {
+  const trimmed = input.trim();
+  if (!trimmed) throw new Error('URL vazia.');
+
+  const hasExplicitScheme = /^[a-z][a-z\d+.-]*:\/\//i.test(trimmed);
+  return hasExplicitScheme ? trimmed : `https://${trimmed}`;
+}
+
+function isPrivateOrReservedIPv4(ip: string): boolean {
+  const parts = ip.split('.').map(Number);
+  if (
+    parts.length !== 4 ||
+    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
+  ) {
+    return true;
+  }
+
+  const [a, b, c] = parts;
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 0 && c === 0) ||
+    (a === 192 && b === 0 && c === 2) ||
+    (a === 192 && b === 88 && c === 99) ||
+    (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    (a === 198 && b === 51 && c === 100) ||
+    (a === 203 && b === 0 && c === 113) ||
+    a >= 224
+  );
+}
+
+function isPrivateOrReservedIPv6(ip: string): boolean {
+  const lower = ip.toLowerCase().split('%')[0];
+  if (lower === '::' || lower === '::1' || lower === '0:0:0:0:0:0:0:1') return true;
+
+  if (lower.startsWith('::ffff:')) {
+    const mapped = lower.slice('::ffff:'.length);
+    return net.isIP(mapped) !== 4 || isPrivateOrReservedIPv4(mapped);
+  }
+
+  return (
+    lower.startsWith('fc') ||
+    lower.startsWith('fd') ||
+    /^fe[89ab]/.test(lower) ||
+    lower.startsWith('ff') ||
+    lower.startsWith('2001:db8:')
+  );
+}
+
+export function isPrivateOrReservedIp(ip: string): boolean {
+  const family = net.isIP(ip);
+  if (family === 4) return isPrivateOrReservedIPv4(ip);
+  if (family === 6) return isPrivateOrReservedIPv6(ip);
+  return true;
+}
+
+function validationError(errorType: SSRFErrorType, error: string): SSRFValidationResult {
+  return { valid: false, errorType, error };
+}
+
+export async function validateUrlForSSRF(
+  urlString: string,
+  options: { dnsLookup?: DnsLookup; dnsTimeoutMs?: number } = {}
+): Promise<SSRFValidationResult> {
   let parsedUrl: URL;
 
   try {
-    // Garante protocolo se não informado
-    if (!/^https?:\/\//i.test(urlString)) {
-      urlString = 'https://' + urlString;
-    }
-    parsedUrl = new URL(urlString);
+    parsedUrl = new URL(normalizeHttpUrl(urlString));
   } catch {
-    return { valid: false, error: 'URL com formato inválido.' };
+    return validationError('INVALID_URL', 'URL com formato inválido.');
   }
 
-  // 1. Protocolo estritamente http ou https
   if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
-    return {
-      valid: false,
-      error: `Protocolo "${parsedUrl.protocol}" não permitido. Apenas HTTP e HTTPS são aceitos.`
-    };
+    return validationError(
+      'UNSUPPORTED_PROTOCOL',
+      `Protocolo "${parsedUrl.protocol}" não permitido. Apenas HTTP e HTTPS são aceitos.`
+    );
   }
 
-  const hostname = parsedUrl.hostname.toLowerCase();
+  if (parsedUrl.username || parsedUrl.password) {
+    return validationError('INVALID_URL', 'URLs com credenciais embutidas não são permitidas.');
+  }
 
-  // 2. Bloqueio de hostnames locais conhecidos
-  const blockedHosts = [
+  const hostname = parsedUrl.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const blockedHosts = new Set([
     'localhost',
-    '127.0.0.1',
-    '::1',
-    '0.0.0.0',
     'metadata.google.internal',
     'instance-data',
-    '169.254.169.254'
-  ];
+    'metadata',
+    'kubernetes.default.svc'
+  ]);
 
   if (
-    blockedHosts.includes(hostname) ||
+    blockedHosts.has(hostname) ||
     hostname.endsWith('.localhost') ||
     hostname.endsWith('.local') ||
     hostname.endsWith('.internal') ||
     hostname.endsWith('.lan')
   ) {
+    return validationError(
+      'SSRF_BLOCKED_HOST',
+      `O endereço "${hostname}" é local ou reservado e foi bloqueado por segurança (Anti-SSRF).`
+    );
+  }
+
+  const directIpFamily = net.isIP(hostname);
+  if (directIpFamily) {
+    if (isPrivateOrReservedIp(hostname)) {
+      return validationError(
+        'SSRF_BLOCKED_IP',
+        `O endereço IP "${hostname}" é privado/reservado e foi bloqueado por segurança (Anti-SSRF).`
+      );
+    }
+
     return {
-      valid: false,
-      error: `O endereço "${hostname}" é local ou reservado e foi bloqueado por segurança (Anti-SSRF).`
+      valid: true,
+      resolvedAddresses: [{ address: hostname, family: directIpFamily as 4 | 6 }]
     };
   }
 
-  // 3. Se for IP direto, valida imediatamente
-  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) {
-    if (isPrivateIPv4(hostname)) {
-      return {
-        valid: false,
-        error: `O endereço IP "${hostname}" é privado/reservado e foi bloqueado por segurança (Anti-SSRF).`
-      };
-    }
-    return { valid: true, resolvedIp: hostname };
-  }
+  const dnsLookup = options.dnsLookup || ((host, lookupOptions) => dns.lookup(host, lookupOptions));
+  const dnsTimeoutMs = options.dnsTimeoutMs || DEFAULT_DNS_TIMEOUT_MS;
+  let timeoutHandle: NodeJS.Timeout | undefined;
 
-  // 4. Se for IPv6 entre colchetes
-  if (hostname.startsWith('[') && hostname.endsWith(']')) {
-    const rawIpv6 = hostname.slice(1, -1);
-    if (isPrivateIPv6(rawIpv6)) {
-      return {
-        valid: false,
-        error: `O endereço IPv6 "${hostname}" é privado e foi bloqueado por segurança (Anti-SSRF).`
-      };
-    }
-    return { valid: true, resolvedIp: rawIpv6 };
-  }
-
-  // 5. Resolução DNS e validação dos IPs resultantes
   try {
-    const records = await dns.lookup(hostname, { all: true });
+    const records = await Promise.race([
+      dnsLookup(hostname, { all: true, verbatim: true }),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          const timeoutError = new Error('DNS lookup timeout') as Error & { code?: string };
+          timeoutError.code = 'DNS_TIMEOUT';
+          reject(timeoutError);
+        }, dnsTimeoutMs);
+      })
+    ]);
 
-    if (!records || records.length === 0) {
-      return { valid: false, error: `Não foi possível resolver o domínio DNS "${hostname}".` };
+    if (!records.length) {
+      return validationError('DNS_NOT_FOUND', `Não foi possível resolver o domínio DNS "${hostname}".`);
     }
 
+    const resolvedAddresses: ResolvedAddress[] = [];
     for (const record of records) {
-      if (record.family === 4 && isPrivateIPv4(record.address)) {
-        return {
-          valid: false,
-          error: `O domínio "${hostname}" resolve para o IP privado/local ${record.address} e foi bloqueado por segurança (Anti-SSRF).`
-        };
+      const family = net.isIP(record.address);
+      if (!family || isPrivateOrReservedIp(record.address)) {
+        return validationError(
+          'SSRF_BLOCKED_IP',
+          `O domínio "${hostname}" resolve para o IP privado/reservado ${record.address} e foi bloqueado por segurança (Anti-SSRF).`
+        );
       }
-      if (record.family === 6 && isPrivateIPv6(record.address)) {
-        return {
-          valid: false,
-          error: `O domínio "${hostname}" resolve para o IPv6 privado ${record.address} e foi bloqueado por segurança (Anti-SSRF).`
-        };
-      }
+      resolvedAddresses.push({ address: record.address, family: family as 4 | 6 });
     }
 
-    return { valid: true, resolvedIp: records[0].address };
-  } catch (err: any) {
-    return {
-      valid: false,
-      error: `Falha ao resolver DNS para "${hostname}": ${err.message || 'Domínio inexistente ou inacessível'}`
-    };
+    return { valid: true, resolvedAddresses };
+  } catch (error: any) {
+    if (error?.code === 'DNS_TIMEOUT') {
+      return validationError('DNS_TIMEOUT', `A resolução DNS de "${hostname}" excedeu ${dnsTimeoutMs}ms.`);
+    }
+
+    const notFoundCodes = new Set(['ENOTFOUND', 'ENODATA', 'EAI_NONAME']);
+    const errorType: SSRFErrorType = notFoundCodes.has(error?.code) ? 'DNS_NOT_FOUND' : 'DNS_ERROR';
+    return validationError(
+      errorType,
+      `Falha ao resolver DNS para "${hostname}": ${error?.message || 'domínio inexistente ou inacessível'}`
+    );
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
   }
 }

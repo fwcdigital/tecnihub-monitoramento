@@ -2,28 +2,21 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Site, 
   Incident, 
-  AlertRule, 
-  FalseAlarmConfig, 
-  NavigationTab,
-  CheckRecord
+  NavigationTab
 } from './types';
 import { 
-  INITIAL_SITES, 
-  INITIAL_INCIDENTS, 
-  INITIAL_ALERT_RULES, 
-  INITIAL_FALSE_ALARM_CONFIG 
-} from './data/mockData';
-import { analyzeSiteTracking } from './utils/trackingAnalyzer';
-import { isSupabaseConfigured } from './services/supabaseClient';
-import { 
   getSitesFromDatabase, 
+  getIncidentsFromDatabase,
   createSiteInDatabase, 
   updateSiteInDatabase, 
   deleteSiteFromDatabase, 
   togglePauseSiteInDatabase, 
   checkSiteNow, 
-  checkAllSitesNow 
+  checkAllSitesNow,
+  resolveIncidentInDatabase,
+  mapDbIncidentToIncident
 } from './services/siteService';
+import { AdminUser, getAdminSession, loginAdmin, logoutAdmin } from './services/authService';
 
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
@@ -38,39 +31,22 @@ import { AddEditSiteModal } from './components/AddEditSiteModal';
 import { IncidentDetailModal } from './components/IncidentDetailModal';
 import { ConfirmDeleteModal } from './components/ConfirmDeleteModal';
 import { ToastContainer, ToastMessage } from './components/Toast';
+import { LoginView } from './components/LoginView';
 
 export default function App() {
+  const [authStatus, setAuthStatus] = useState<'checking' | 'authenticated' | 'unauthenticated'>('checking');
+  const [adminUser, setAdminUser] = useState<AdminUser | null>(null);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+
   // Navigation State
   const [currentTab, setCurrentTab] = useState<NavigationTab>('dashboard');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   // Core Data State
   const [sites, setSites] = useState<Site[]>([]);
-  const [isLoadingSites, setIsLoadingSites] = useState(true);
-
-  const [incidents, setIncidents] = useState<Incident[]>(() => {
-    try {
-      const saved = localStorage.getItem('tecnihub_incidents_v1');
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return INITIAL_INCIDENTS;
-  });
-
-  const [alertRules, setAlertRules] = useState<AlertRule[]>(() => {
-    try {
-      const saved = localStorage.getItem('tecnihub_alerts_v1');
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return INITIAL_ALERT_RULES;
-  });
-
-  const [falseAlarmConfig, setFalseAlarmConfig] = useState<FalseAlarmConfig>(() => {
-    try {
-      const saved = localStorage.getItem('tecnihub_false_alarm_v1');
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return INITIAL_FALSE_ALARM_CONFIG;
-  });
+  const [incidents, setIncidents] = useState<Incident[]>([]);
+  const [operationalDataStatus, setOperationalDataStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [operationalDataError, setOperationalDataError] = useState('');
 
   // Modal States
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
@@ -101,63 +77,92 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // 1. Initial Load: Fetch from Supabase or Fallback
+  const reloadOperationalData = useCallback(async () => {
+    const dbSites = await getSitesFromDatabase();
+    const dbIncidents = await getIncidentsFromDatabase(dbSites);
+    setSites(dbSites);
+    setIncidents(dbIncidents);
+  }, []);
+
   useEffect(() => {
+    if (!window.location.pathname.startsWith('/admin')) {
+      window.history.replaceState(null, '', '/admin');
+    }
+
+    let active = true;
+    getAdminSession()
+      .then((user) => {
+        if (!active) return;
+        setAdminUser(user);
+        setAuthStatus(user ? 'authenticated' : 'unauthenticated');
+      })
+      .catch(() => {
+        if (!active) return;
+        setAdminUser(null);
+        setAuthStatus('unauthenticated');
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleSessionExpired = () => {
+      setAdminUser(null);
+      setSites([]);
+      setIncidents([]);
+      setOperationalDataStatus('loading');
+      setOperationalDataError('');
+      setAuthStatus('unauthenticated');
+    };
+    window.addEventListener('tecnihub:session-expired', handleSessionExpired);
+    return () => window.removeEventListener('tecnihub:session-expired', handleSessionExpired);
+  }, []);
+
+  // 1. Initial Load: all database access now goes through the backend API.
+  useEffect(() => {
+    if (authStatus !== 'authenticated') return;
+
     async function loadData() {
-      setIsLoadingSites(true);
-      if (isSupabaseConfigured()) {
-        try {
-          const dbSites = await getSitesFromDatabase();
-          setSites(dbSites);
-        } catch (err: any) {
-          console.error('Erro ao carregar do Supabase:', err);
-          addToast('error', 'Falha ao conectar com o Supabase', err.message);
-        }
-      } else {
-        // Fallback para localStorage se Supabase ainda não estiver configurado
-        try {
-          const saved = localStorage.getItem('tecnihub_sites_v1');
-          if (saved) {
-            setSites(JSON.parse(saved));
-          } else {
-            setSites([]);
-          }
-        } catch {
-          setSites([]);
-        }
+      setOperationalDataStatus('loading');
+      setOperationalDataError('');
+      try {
+        await reloadOperationalData();
+        setOperationalDataStatus('ready');
+      } catch (err: any) {
+        console.error('Erro ao carregar sites pela API:', err);
+        setSites([]);
+        setIncidents([]);
+        setOperationalDataStatus('error');
+        setOperationalDataError(err.message || 'Não foi possível carregar os dados operacionais.');
+        addToast('error', 'Falha ao carregar sites', err.message);
       }
-      setIsLoadingSites(false);
     }
 
     loadData();
-  }, [addToast]);
+  }, [addToast, authStatus, reloadOperationalData]);
 
-  // Save to localStorage as backup if Supabase is not yet configured
   useEffect(() => {
-    if (!isSupabaseConfigured() && !isLoadingSites) {
-      try {
-        localStorage.setItem('tecnihub_sites_v1', JSON.stringify(sites));
-      } catch {}
+    if (authStatus !== 'authenticated') return;
+    const timer = window.setInterval(() => {
+      reloadOperationalData().catch((error) => {
+        console.error('Falha no auto-refresh dos dados operacionais:', error);
+      });
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [authStatus, reloadOperationalData]);
+
+  const handleRetryOperationalData = async () => {
+    setOperationalDataStatus('loading');
+    setOperationalDataError('');
+    try {
+      await reloadOperationalData();
+      setOperationalDataStatus('ready');
+    } catch (err: any) {
+      setOperationalDataStatus('error');
+      setOperationalDataError(err.message || 'Não foi possível carregar os dados operacionais.');
     }
-  }, [sites, isLoadingSites]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('tecnihub_incidents_v1', JSON.stringify(incidents));
-    } catch {}
-  }, [incidents]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('tecnihub_alerts_v1', JSON.stringify(alertRules));
-    } catch {}
-  }, [alertRules]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('tecnihub_false_alarm_v1', JSON.stringify(falseAlarmConfig));
-    } catch {}
-  }, [falseAlarmConfig]);
+  };
 
   // Keep selectedSiteDetail synchronized with sites updates
   useEffect(() => {
@@ -170,8 +175,11 @@ export default function App() {
   }, [sites]);
 
   // Counters
-  const offlineCount = sites.filter((s) => s.status === 'offline').length;
+  const offlineCount = sites.filter((s) => s.status === 'offline' || s.status === 'critical').length;
   const warningCount = sites.filter((s) => s.status === 'warning').length;
+  const onlineCount = sites.filter((s) => s.status === 'online').length;
+  const pausedCount = sites.filter((s) => s.status === 'paused').length;
+  const unknownCount = sites.filter((s) => s.status === 'unknown').length;
   const activeIncidentsCount = incidents.filter((i) => i.status === 'active').length;
 
   // Modal Triggers
@@ -197,73 +205,25 @@ export default function App() {
     setIsSavingSite(true);
     try {
       if (siteToEdit) {
-        // Edit existing site
-        if (isSupabaseConfigured()) {
-          await updateSiteInDatabase(siteToEdit.id, siteData);
-        }
+        // Edit existing site through the backend (never directly through anon RLS).
+        await updateSiteInDatabase(siteToEdit.id, siteData);
         setSites((prev) =>
           prev.map((s) => (s.id === siteToEdit.id ? { ...s, ...siteData } : s))
         );
         addToast('success', 'Site atualizado', `As configurações de ${siteData.siteName || siteToEdit.siteName} foram salvas.`);
-        setIsAddModalOpen(false);
       } else {
         // Add new site
-        if (isSupabaseConfigured()) {
-          const createdSite = await createSiteInDatabase(siteData);
-          if (createdSite) {
-            setSites((prev) => [createdSite, ...prev]);
-            addToast('success', 'Site cadastrado com sucesso', `${createdSite.siteName} foi salvo no banco e verificado.`);
-          }
-        } else {
-          // Local fallback
-          const newId = `site-${Date.now()}`;
-          const newSite: Site = {
-            id: newId,
-            client: siteData.client || 'Novo Cliente',
-            siteName: siteData.siteName || 'Novo Site',
-            url: siteData.url || 'https://exemplo.com.br',
-            domain: siteData.domain || 'exemplo.com.br',
-            hosting: siteData.hosting || 'Hostinger',
-            isWordPress: siteData.isWordPress ?? false,
-            isActive: true,
-            frequency: siteData.frequency || '5min',
-            status: 'online',
-            uptime30d: 100.0,
-            responseTime: 0.85,
-            avgResponseTime: 0.85,
-            sslValid: true,
-            sslDaysRemaining: 90,
-            domainDaysRemaining: 365,
-            lastCheck: 'Agora',
-            httpStatus: 200,
-            monitorAvailability: siteData.monitorAvailability ?? true,
-            monitorResponseTime: siteData.monitorResponseTime ?? true,
-            monitorSsl: siteData.monitorSsl ?? true,
-            monitorDomain: siteData.monitorDomain ?? true,
-            monitorRedirects: siteData.monitorRedirects ?? true,
-            monitorContent: siteData.monitorContent ?? false,
-            expectedContentText: siteData.expectedContentText || '',
-            consecutiveFailures: 0,
-            createdAt: new Date().toISOString().slice(0, 10),
-            checksHistory: [
-              {
-                id: `chk-${Date.now()}`,
-                timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                status: 'online',
-                httpCode: 200,
-                responseTime: 0.85,
-                result: 'Site cadastrado e validado com sucesso'
-              }
-            ]
-          };
-          setSites((prev) => [newSite, ...prev]);
-          addToast('success', 'Site cadastrado com sucesso', `${newSite.siteName} entrou na fila de monitoramento.`);
+        const createdSite = await createSiteInDatabase(siteData);
+        if (createdSite) {
+          setSites((prev) => [createdSite, ...prev]);
+          addToast('success', 'Site cadastrado com sucesso', `${createdSite.siteName} foi salvo no banco.`);
         }
-        setIsAddModalOpen(false);
       }
+      return true;
     } catch (err: any) {
       console.error('Erro ao salvar site:', err);
       addToast('error', 'Erro ao salvar site', err.message || 'Ocorreu um erro ao salvar o site.');
+      return false;
     } finally {
       setIsSavingSite(false);
     }
@@ -276,48 +236,41 @@ export default function App() {
 
     const isCurrentlyPaused = site.status === 'paused';
     const nextStatus = isCurrentlyPaused ? 'online' : 'paused';
-    const nextIsActive = isCurrentlyPaused; // if paused, next is active (true)
 
     try {
-      if (isSupabaseConfigured()) {
-        await togglePauseSiteInDatabase(siteId, !isCurrentlyPaused);
+      await togglePauseSiteInDatabase(siteId, !isCurrentlyPaused);
+      try {
+        await reloadOperationalData();
+      } catch (reloadError) {
+        console.error('Alteração persistida, mas a atualização da tela falhou:', reloadError);
+        setSites((previous) => previous.map((candidate) => candidate.id === siteId
+          ? {
+              ...candidate,
+              isActive: isCurrentlyPaused,
+              status: isCurrentlyPaused ? 'unknown' : 'paused'
+            }
+          : candidate));
       }
-
-      setSites((prev) =>
-        prev.map((s) => {
-          if (s.id === siteId) {
-            return {
-              ...s,
-              status: nextStatus,
-              isActive: nextIsActive,
-              lastCheck: nextStatus === 'paused' ? 'Pausado' : 'Há 1 min'
-            };
-          }
-          return s;
-        })
-      );
 
       addToast(
         nextStatus === 'paused' ? 'info' : 'success',
-        nextStatus === 'paused' ? 'Monitoramento pausado' : 'Monitoramento retomado',
-        `O site ${site.domain} foi ${nextStatus === 'paused' ? 'pausado' : 'reativado'}.`
+        nextStatus === 'paused' ? 'Monitoramento desativado' : 'Monitoramento reativado',
+        `O monitoramento de ${site.domain} foi ${nextStatus === 'paused' ? 'desativado' : 'reativado'}.`
       );
     } catch (err: any) {
-      console.error('Erro ao pausar site:', err);
+      console.error('Erro ao alterar monitoramento do site:', err);
       addToast('error', 'Erro ao alternar status', err.message);
     }
   };
 
   // Confirm Delete Site
-  const handleConfirmDeleteSite = async (siteId: string) => {
+  const handleConfirmDeleteSite = async (siteId: string, confirmation: string) => {
     const site = sites.find((s) => s.id === siteId);
     if (!site) return;
 
     setIsDeletingSite(true);
     try {
-      if (isSupabaseConfigured()) {
-        await deleteSiteFromDatabase(siteId);
-      }
+      await deleteSiteFromDatabase(siteId, confirmation);
 
       setSites((prev) => prev.filter((s) => s.id !== siteId));
 
@@ -344,61 +297,31 @@ export default function App() {
     setCheckingSiteId(siteId);
 
     try {
-      const response = await checkSiteNow(siteId, targetSite.url);
-      const { result, checkedAt } = response;
-
-      const dateObj = new Date(checkedAt || Date.now());
-      const day = String(dateObj.getDate()).padStart(2, '0');
-      const month = String(dateObj.getMonth() + 1).padStart(2, '0');
-      const hours = String(dateObj.getHours()).padStart(2, '0');
-      const mins = String(dateObj.getMinutes()).padStart(2, '0');
-      const secs = String(dateObj.getSeconds()).padStart(2, '0');
-      const formattedTimestamp = `${day}/${month} ${hours}:${mins}:${secs}`;
-
-      const responseTimeInSeconds = +(result.responseTime / 1000).toFixed(2);
-
-      const newRecord: CheckRecord = {
-        id: response.checkId || `chk-${Date.now()}`,
-        timestamp: formattedTimestamp,
-        status: result.status,
-        httpCode: result.httpStatus ?? (result.status === 'offline' ? 'ERR' : 200),
-        responseTime: responseTimeInSeconds,
-        result: result.resultMessage
-      };
-
-      setSites((prev) =>
-        prev.map((s) => {
-          if (s.id === siteId) {
-            const updatedHistory = [newRecord, ...s.checksHistory.slice(0, 19)];
-            const onlineChecks = updatedHistory.filter(c => c.status === 'online').length;
-            const newUptime = +((onlineChecks / updatedHistory.length) * 100).toFixed(2);
-
-            return {
-              ...s,
-              status: result.status,
-              httpStatus: result.httpStatus ?? (result.status === 'offline' ? 503 : 200),
-              responseTime: result.status === 'offline' ? 0 : responseTimeInSeconds,
-              lastCheck: 'Há instantes',
-              uptime30d: newUptime,
-              consecutiveFailures: result.status === 'offline' ? (s.consecutiveFailures + 1) : 0,
-              checksHistory: updatedHistory
-            };
-          }
-          return s;
-        })
-      );
+      const response = await checkSiteNow(siteId);
+      const { result } = response;
+      try {
+        await reloadOperationalData();
+      } catch (reloadError) {
+        console.error('Check persistido, mas a atualização da tela falhou:', reloadError);
+      }
 
       if (result.status === 'online') {
         addToast(
           'success',
           'Verificação concluída com sucesso',
-          `${targetSite.domain} respondeu em ${result.responseTime}ms (HTTP ${result.httpStatus || 200}).`
+          `${targetSite.domain} respondeu em ${result.responseTime}ms (HTTP ${result.httpStatus ?? 'sem código'}).`
         );
       } else if (result.status === 'warning') {
         addToast(
           'warning',
           'Alerta na verificação',
           `${targetSite.domain} retornou HTTP ${result.httpStatus}. ${result.errorMessage || ''}`
+        );
+      } else if (result.status === 'critical') {
+        addToast(
+          'error',
+          'CRÍTICO: erro do servidor',
+          `${targetSite.domain}: ${result.resultMessage}`
         );
       } else {
         addToast(
@@ -425,55 +348,17 @@ export default function App() {
 
     setIsCheckingAll(true);
     try {
-      const activeSites = sites
-        .filter((s) => s.status !== 'paused')
-        .map((s) => ({ id: s.id, url: s.url, name: s.siteName }));
-
-      const response = await checkAllSitesNow(activeSites);
-
-      if (response && response.results) {
-        setSites((prev) =>
-          prev.map((s) => {
-            const checkData = response.results.find((r: any) => r.siteId === s.id);
-            if (!checkData) return s;
-
-            const res = checkData.result;
-            const resTimeSec = +(res.responseTime / 1000).toFixed(2);
-            const now = new Date();
-            const day = String(now.getDate()).padStart(2, '0');
-            const month = String(now.getMonth() + 1).padStart(2, '0');
-            const hours = String(now.getHours()).padStart(2, '0');
-            const mins = String(now.getMinutes()).padStart(2, '0');
-            const secs = String(now.getSeconds()).padStart(2, '0');
-
-            const record: CheckRecord = {
-              id: `chk-${Date.now()}-${s.id}`,
-              timestamp: `${day}/${month} ${hours}:${mins}:${secs}`,
-              status: res.status,
-              httpCode: res.httpStatus ?? (res.status === 'offline' ? 'ERR' : 200),
-              responseTime: resTimeSec,
-              result: res.resultMessage
-            };
-
-            const updatedHistory = [record, ...s.checksHistory.slice(0, 19)];
-            const onlineChecks = updatedHistory.filter(c => c.status === 'online').length;
-            const newUptime = +((onlineChecks / updatedHistory.length) * 100).toFixed(2);
-
-            return {
-              ...s,
-              status: res.status,
-              httpStatus: res.httpStatus ?? (res.status === 'offline' ? 503 : 200),
-              responseTime: res.status === 'offline' ? 0 : resTimeSec,
-              lastCheck: 'Há instantes',
-              uptime30d: newUptime,
-              consecutiveFailures: res.status === 'offline' ? (s.consecutiveFailures + 1) : 0,
-              checksHistory: updatedHistory
-            };
-          })
-        );
-
-        addToast('success', 'Varredura global finalizada', `${response.totalChecked || activeSites.length} sites verificados pelo servidor com sucesso.`);
+      const response = await checkAllSitesNow();
+      try {
+        await reloadOperationalData();
+      } catch (reloadError) {
+        console.error('Varredura persistida, mas a atualização da tela falhou:', reloadError);
       }
+      addToast(
+        response.totalFailed > 0 ? 'warning' : 'success',
+        'Varredura global finalizada',
+        `${response.totalChecked || 0} sites verificados; ${response.totalFailed || 0} falha(s) isolada(s).`
+      );
     } catch (err: any) {
       console.error('Erro na varredura global:', err);
       addToast('error', 'Falha na varredura global', err.message);
@@ -489,151 +374,83 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // Verify site tracking tags
-  const handleVerifySiteTracking = (siteId: string) => {
-    const site = sites.find((s) => s.id === siteId);
-    if (!site) return;
-
-    const updatedTracking = analyzeSiteTracking(site.tracking);
-    setSites((prev) =>
-      prev.map((s) => (s.id === siteId ? { ...s, tracking: updatedTracking } : s))
-    );
-    addToast('success', 'Rastreamento atualizado', `Tags e integrações de ${site.domain} verificadas com sucesso.`);
-  };
-
   // Select incident for modal
   const handleSelectIncident = (incident: Incident) => {
     setSelectedIncidentDetail(incident);
     setIsIncidentModalOpen(true);
   };
 
-  const handleResolveIncident = (incidentId: string) => {
+  const handleResolveIncident = async (incidentId: string) => {
     const inc = incidents.find((i) => i.id === incidentId);
     if (!inc) return;
-
-    setIncidents((prev) =>
-      prev.map((i) =>
-        i.id === incidentId
-          ? {
-              ...i,
-              status: 'resolved',
-              resolvedAt: 'Hoje, ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-              currentStatus: 'Resolvido e normalizado pela equipe'
-            }
-          : i
-      )
-    );
-
-    // If site was offline, restore it to online
-    setSites((prev) =>
-      prev.map((s) => {
-        if (s.id === inc.siteId && s.status === 'offline') {
-          return {
-            ...s,
-            status: 'online',
-            httpStatus: 200,
-            responseTime: 0.84,
-            consecutiveFailures: 0,
-            lastCheck: 'Há instantes'
-          };
-        }
-        return s;
-      })
-    );
-
-    addToast('success', 'Incidente marcado como resolvido', `Ocorrência de ${inc.client} foi encerrada.`);
-  };
-
-  // Simulator Triggers (for testing)
-  const handleSimulateOutage = () => {
-    if (sites.length === 0) {
-      addToast('info', 'Cadastre um site primeiro para testar o simulador.', '');
-      return;
+    try {
+      const resolvedIncident = await resolveIncidentInDatabase(incidentId);
+      try {
+        await reloadOperationalData();
+      } catch (reloadError) {
+        console.error('Resolução persistida, mas a atualização da tela falhou:', reloadError);
+        setIncidents((previous) => previous.map((incident) => incident.id === incidentId
+          ? mapDbIncidentToIncident(resolvedIncident, sites)
+          : incident));
+      }
+      addToast('success', 'Incidente marcado como resolvido', `Ocorrência de ${inc.client} foi encerrada.`);
+    } catch (err: any) {
+      addToast('error', 'Falha ao resolver incidente', err.message);
     }
-    const target = sites[0];
-    setSites((prev) =>
-      prev.map((s) => {
-        if (s.id === target.id) {
-          return {
-            ...s,
-            status: 'offline',
-            httpStatus: 503,
-            responseTime: 0,
-            consecutiveFailures: 3,
-            lastCheck: 'Há 1 min'
-          };
-        }
-        return s;
-      })
-    );
-    addToast('error', 'Simulação de Queda Ativada', `${target.client} marcado como Offline (HTTP 503).`);
-    setCurrentTab('dashboard');
   };
 
-  const handleSimulateSlowdown = () => {
-    if (sites.length === 0) {
-      addToast('info', 'Cadastre um site primeiro para testar o simulador.', '');
-      return;
+  const handleLogin = async (email: string, password: string) => {
+    const user = await loginAdmin(email, password);
+    setOperationalDataStatus('loading');
+    setOperationalDataError('');
+    setAdminUser(user);
+    setAuthStatus('authenticated');
+  };
+
+  const handleLogout = async () => {
+    setIsLoggingOut(true);
+    try {
+      await logoutAdmin();
+    } finally {
+      setSites([]);
+      setIncidents([]);
+      setAdminUser(null);
+      setOperationalDataStatus('loading');
+      setOperationalDataError('');
+      setAuthStatus('unauthenticated');
+      setIsLoggingOut(false);
     }
-    const target = sites[0];
-    setSites((prev) =>
-      prev.map((s) => {
-        if (s.id === target.id) {
-          return {
-            ...s,
-            status: 'warning',
-            responseTime: 5.74,
-            lastCheck: 'Há 2 min'
-          };
-        }
-        return s;
-      })
-    );
-    addToast('warning', 'Simulação de Lentidão Ativada', `${target.siteName} com tempo de resposta em 5,74s.`);
-    setCurrentTab('dashboard');
   };
 
-  const handleRestoreAllHealthy = () => {
-    setSites((prev) =>
-      prev.map((s) => ({
-        ...s,
-        status: 'online',
-        httpStatus: 200,
-        responseTime: +(0.5 + Math.random() * 0.4).toFixed(2),
-        sslDaysRemaining: Math.max(s.sslDaysRemaining, 65),
-        domainDaysRemaining: Math.max(s.domainDaysRemaining, 120),
-        consecutiveFailures: 0,
-        lastCheck: 'Há instantes'
-      }))
+  if (authStatus === 'checking') {
+    return (
+      <div className="min-h-screen bg-black text-neutral-500 flex items-center justify-center font-mono text-xs">
+        Validando sessão administrativa...
+      </div>
     );
-    setIncidents((prev) =>
-      prev.map((i) => ({
-        ...i,
-        status: 'resolved',
-        resolvedAt: 'Agora',
-        currentStatus: 'Resolvido - normalizado'
-      }))
+  }
+
+  if (!adminUser || authStatus !== 'authenticated') {
+    return <LoginView onLogin={handleLogin} />;
+  }
+
+  if (operationalDataStatus !== 'ready') {
+    return (
+      <div className="min-h-screen bg-black text-neutral-400 flex items-center justify-center p-6 font-mono text-xs">
+        {operationalDataStatus === 'loading' ? (
+          <span>Carregando dados operacionais persistidos...</span>
+        ) : (
+          <div className="max-w-md text-center space-y-3">
+            <p className="text-white font-semibold">Não foi possível carregar os dados operacionais.</p>
+            <p className="text-neutral-500">{operationalDataError || 'Serviço indisponível.'}</p>
+            <button onClick={handleRetryOperationalData} className="px-3 py-1.5 rounded bg-white text-black font-semibold">
+              Tentar novamente
+            </button>
+          </div>
+        )}
+      </div>
     );
-    addToast('success', 'Todos os sites restaurados', '100% da carteira de sites operando em estado saudável (Online).');
-    setCurrentTab('dashboard');
-  };
-
-  const handleResetToDefaults = () => {
-    setSites(INITIAL_SITES);
-    setIncidents(INITIAL_INCIDENTS);
-    setAlertRules(INITIAL_ALERT_RULES);
-    setFalseAlarmConfig(INITIAL_FALSE_ALARM_CONFIG);
-    localStorage.removeItem('tecnihub_sites_v1');
-    localStorage.removeItem('tecnihub_incidents_v1');
-    localStorage.removeItem('tecnihub_alerts_v1');
-    localStorage.removeItem('tecnihub_false_alarm_v1');
-    addToast('info', 'Base de dados resetada', '15 sites e incidentes restaurados aos valores padrão.');
-    setCurrentTab('dashboard');
-  };
-
-  const handleSendTestAlert = (channel: string) => {
-    addToast('info', 'Alerta de Teste Disparado', `Mensagem simulada enviada com sucesso para ${channel}.`);
-  };
+  }
 
   return (
     <div className="min-h-screen bg-[#000000] text-[#FFFFFF] flex flex-col antialiased selection:bg-neutral-800 selection:text-white">
@@ -649,9 +466,15 @@ export default function App() {
         activeIncidentsCount={activeIncidentsCount}
         offlineCount={offlineCount}
         warningCount={warningCount}
+        onlineCount={onlineCount}
+        pausedCount={pausedCount}
+        unknownCount={unknownCount}
         totalSitesCount={sites.length}
         isOpenMobile={isMobileMenuOpen}
         onCloseMobile={() => setIsMobileMenuOpen(false)}
+        adminEmail={adminUser.email}
+        onLogout={handleLogout}
+        isLoggingOut={isLoggingOut}
       />
 
       {/* Main Content Area (offset by sidebar width on desktop) */}
@@ -712,7 +535,6 @@ export default function App() {
               onCheckNow={handleCheckSiteNow}
               onEdit={handleOpenEditSite}
               onTogglePause={handleTogglePauseSite}
-              onVerifyTracking={handleVerifySiteTracking}
               isChecking={checkingSiteId === selectedSiteDetail.id}
             />
           )}
@@ -727,18 +549,7 @@ export default function App() {
           )}
 
           {currentTab === 'alerts' && (
-            <AlertsView
-              alertRules={alertRules}
-              falseAlarmConfig={falseAlarmConfig}
-              onUpdateRule={(updated) =>
-                setAlertRules((prev) => prev.map((r) => (r.id === updated.id ? updated : r)))
-              }
-              onUpdateFalseAlarmConfig={(cfg) => {
-                setFalseAlarmConfig(cfg);
-                addToast('success', 'Configurações salvas', 'Parâmetros anti-falsos alertas atualizados.');
-              }}
-              onSendTestAlert={handleSendTestAlert}
-            />
+            <AlertsView />
           )}
 
           {currentTab === 'reports' && (
@@ -750,12 +561,7 @@ export default function App() {
           )}
 
           {currentTab === 'settings' && (
-            <SettingsView
-              onSimulateOutage={handleSimulateOutage}
-              onSimulateSlowdown={handleSimulateSlowdown}
-              onRestoreAllHealthy={handleRestoreAllHealthy}
-              onResetToDefaults={handleResetToDefaults}
-            />
+            <SettingsView />
           )}
         </main>
       </div>
