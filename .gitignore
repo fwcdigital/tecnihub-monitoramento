@@ -13,3 +13,5 @@ coverage/
 *.pfx
 *.credentials.json
 secrets/
+backup-supabase/
+supabase/.temp/
