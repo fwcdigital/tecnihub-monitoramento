@@ -10,88 +10,116 @@ const INTERVAL_MS: Record<string, number> = {
   daily: 24 * 60 * 60_000
 };
 
+export const MAX_SCHEDULER_CONCURRENCY = 5;
+export const DEFAULT_SCHEDULER_CLAIM_LIMIT = 100;
+const SCHEDULER_LOCK_KEY = 'tecnihub-primary-monitor';
+
 export function isSupportedCheckInterval(checkInterval: unknown): checkInterval is keyof typeof INTERVAL_MS {
   return typeof checkInterval === 'string' && Object.hasOwn(INTERVAL_MS, checkInterval);
 }
 
-interface ScheduledSite extends SiteRecordForCheck {
-  check_interval: string;
-}
-
-export function isSiteDue(
-  checkInterval: string,
-  latestCheckedAt: string | null,
-  nowMs = Date.now()
-): boolean {
+export function isSiteDue(checkInterval: string, latestCheckedAt: string | null, nowMs = Date.now()): boolean {
   if (!isSupportedCheckInterval(checkInterval)) return false;
-  const intervalMs = INTERVAL_MS[checkInterval];
   if (!latestCheckedAt) return true;
   const latestMs = new Date(latestCheckedAt).getTime();
-  return Number.isFinite(latestMs) && nowMs - latestMs >= intervalMs;
+  return Number.isFinite(latestMs) && nowMs - latestMs >= INTERVAL_MS[checkInterval];
+}
+
+export interface MonitoringCycleResult {
+  acquired: boolean;
+  runId?: string;
+  claimed: number;
+  checked: number;
+  skipped: number;
+  failed: number;
+  concurrency: number;
 }
 
 export async function runMonitoringCycle(
   supabase: SupabaseClient,
-  concurrency = 5,
-  nowMs = Date.now()
-): Promise<{ checked: number; skipped: number; failed: number }> {
-  const { data, error } = await supabase
-    .from('sites')
-    .select('id, url, name, is_active, check_interval')
-    .eq('is_active', true);
-  if (error) throw new Error(`Falha ao carregar sites do agendador: ${error.message}`);
-
-  const results = await mapWithConcurrency((data || []) as ScheduledSite[], concurrency, async (site) => {
-    const latestResult = await supabase
-      .from('checks')
-      .select('checked_at')
-      .eq('site_id', site.id)
-      .order('checked_at', { ascending: false })
-      .limit(1);
-    if (latestResult.error) return 'failed' as const;
-    if (!isSiteDue(site.check_interval, latestResult.data?.[0]?.checked_at || null, nowMs)) {
-      return 'skipped' as const;
-    }
-
-    try {
-      await processSiteCheck({ siteId: site.id, trustedSite: site }, { supabase });
-      return 'checked' as const;
-    } catch {
-      return 'failed' as const;
-    }
+  concurrency = MAX_SCHEDULER_CONCURRENCY,
+  nowMs = Date.now(),
+  triggerType: 'cron' | 'manual' | 'batch' = 'cron',
+  claimLimit = DEFAULT_SCHEDULER_CLAIM_LIMIT
+): Promise<MonitoringCycleResult> {
+  const effectiveConcurrency = Math.max(1, Math.min(MAX_SCHEDULER_CONCURRENCY, Math.floor(concurrency) || 1));
+  const { data: lockData, error: lockError } = await supabase.rpc('claim_monitoring_run', {
+    p_lock_key: SCHEDULER_LOCK_KEY,
+    p_trigger_type: triggerType,
+    p_lease_seconds: 900
   });
+  if (lockError) throw new Error(`Falha ao adquirir trava distribuída do scheduler: ${lockError.message}`);
+  const lock = Array.isArray(lockData) ? lockData[0] : lockData;
+  if (!lock?.run_id || !lock?.owner_token) {
+    return { acquired: false, claimed: 0, checked: 0, skipped: 0, failed: 0, concurrency: effectiveConcurrency };
+  }
 
-  return {
-    checked: results.filter((result) => result === 'checked').length,
-    skipped: results.filter((result) => result === 'skipped').length,
-    failed: results.filter((result) => result === 'failed').length
-  };
-}
+  const runId = lock.run_id as string;
+  const ownerToken = lock.owner_token as string;
+  let claimed = 0;
+  let checked = 0;
+  let failed = 0;
+  let fatalError: string | undefined;
 
-export function startMonitoringScheduler(
-  getSupabase: () => SupabaseClient | null,
-  options: { enabled: boolean; concurrency?: number; pollIntervalMs?: number } = { enabled: false }
-): () => void {
-  if (!options.enabled) return () => undefined;
-
-  let running = false;
-  const run = async () => {
-    if (running) return;
-    const supabase = getSupabase();
-    if (!supabase) return;
-    running = true;
-    try {
-      const result = await runMonitoringCycle(supabase, options.concurrency || 5);
-      console.log(`[Scheduler] ${result.checked} check(s), ${result.skipped} fora do prazo, ${result.failed} falha(s).`);
-    } catch (error) {
-      console.error('[Scheduler] Ciclo não executado:', error instanceof Error ? error.message : 'erro inesperado');
-    } finally {
-      running = false;
+  try {
+    const { data: dueSites, error: dueError } = await supabase.rpc('claim_due_monitoring_sites', {
+      p_run_id: runId,
+      p_owner_token: ownerToken,
+      p_limit: Math.max(1, Math.min(500, Math.floor(claimLimit) || DEFAULT_SCHEDULER_CLAIM_LIMIT)),
+      p_now: new Date(nowMs).toISOString()
+    });
+    if (dueError) throw new Error(`Falha ao reservar sites vencidos: ${dueError.message}`);
+    const sites = (dueSites || []) as SiteRecordForCheck[];
+    claimed = sites.length;
+    const results = await mapWithConcurrency(sites, effectiveConcurrency, async (site) => {
+      try {
+        await processSiteCheck({ siteId: site.id, trustedSite: site, runId }, { supabase });
+        return true;
+      } catch (error) {
+        console.error(
+          '[Scheduler Site Error]',
+          site.id,
+          error instanceof Error ? error.message : 'erro inesperado'
+        );
+        return false;
+      } finally {
+        const { error: renewError } = await supabase.rpc('renew_monitoring_run', {
+          p_run_id: runId,
+          p_owner_token: ownerToken,
+          p_lease_seconds: 900
+        });
+        if (renewError) console.error('[Scheduler Lease Error]', renewError.message);
+      }
+    });
+    checked = results.filter(Boolean).length;
+    failed = results.length - checked;
+  } catch (error) {
+    fatalError = error instanceof Error ? error.message : 'Falha inesperada do scheduler.';
+  } finally {
+    const { data: finished, error: finishError } = await supabase.rpc('finish_monitoring_run', {
+      p_run_id: runId,
+      p_owner_token: ownerToken,
+      p_status: fatalError ? 'failed' : 'completed',
+      p_claimed_sites: claimed,
+      p_checked_sites: checked,
+      p_failed_sites: failed,
+      p_skipped_sites: 0,
+      p_error_message: fatalError || null
+    });
+    if (finishError && !fatalError) fatalError = `Falha ao finalizar execução: ${finishError.message}`;
+    if (!finishError && finished !== true && !fatalError) {
+      fatalError = 'A execução perdeu a posse da trava antes da finalização.';
     }
-  };
+  }
 
-  void run();
-  const timer = setInterval(() => void run(), options.pollIntervalMs || 60_000);
-  timer.unref();
-  return () => clearInterval(timer);
+  if (fatalError) throw new Error(fatalError);
+  return {
+    acquired: true,
+    runId,
+    claimed,
+    checked,
+    skipped: 0,
+    failed,
+    concurrency: effectiveConcurrency
+  };
 }

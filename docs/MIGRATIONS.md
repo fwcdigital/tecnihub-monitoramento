@@ -1,39 +1,119 @@
-# Migrations do MVP
+# Migrations do monitoramento
 
-As migrations são propostas versionadas. A aplicação não as executa automaticamente.
+As migrations são propostas versionadas e a aplicação nunca as executa automaticamente. Nenhuma migration foi aplicada durante esta implementação.
 
-## 001 — status `critical` em checks
+## 001 — status `critical`
 
-Arquivo: `supabase/migrations/20260831_001_checks_critical_status.sql`.
+Permite persistir erros HTTP 5xx como `critical`. Não remove linhas; substitui somente a constraint de `checks.status`.
 
-- Finalidade: permitir que erros HTTP 5xx sejam persistidos como `critical`.
-- Impacto: substitui apenas a constraint de domínio do campo `checks.status`; não altera nem remove linhas.
-- Dependência: tabela `public.checks` criada pelo `schema.sql`.
-- Risco: lock curto de DDL na tabela; a migration falha se existirem valores fora de `online`, `warning`, `critical` e `offline`.
-- Verificação posterior: executar um check controlado que resulte em 5xx e confirmar a persistência de `critical`.
+## 002 — acesso somente pelo backend
 
-## 002 — bloqueio de acesso direto
+Revoga acesso direto de `anon`/`authenticated` às tabelas operacionais e mantém `service_role`. Não remove dados.
 
-Arquivo: `supabase/migrations/20260831_002_restrict_direct_api_access.sql`.
+## 003 — motor, estado e scheduler distribuído
 
-- Finalidade: remover policies e privilégios diretos de `anon`/`authenticated` nas tabelas operacionais.
-- Impacto: o frontend ou qualquer cliente usando anon key deixa de consultar/gravar `sites`, `checks` e `incidents`; `service_role` permanece com acesso.
-- Dependências: backend publicado e validado com `SUPABASE_SERVICE_ROLE_KEY`; autenticação administrativa funcional.
-- Risco: aplicar antes de validar o backend pode indisponibilizar a área administrativa. Não remove dados.
-- Verificação posterior: service role deve continuar acessando as três tabelas; anon e authenticated devem receber negação/resultado vazio conforme o cliente.
+Arquivo: `supabase/migrations/20260901_003_monitoring_engine.sql`.
 
-## Ordem exata de aplicação
+- adiciona estado persistido por site (`last_checked_at`, `next_check_at`, contadores e `monitoring_state`);
+- adiciona diagnósticos estruturados aos checks (SSL, DNS/IP, RDAP, conteúdo, WordPress e JSON técnico);
+- cria cache RDAP, execuções e lease renovável do scheduler e das reservas de sites;
+- cria RPCs atômicas para claim, persistência do check/transição de incidente, finalização e agregações;
+- adiciona vínculo check–incidente e índice único de um incidente ativo por site;
+- troca as FKs de histórico para `ON DELETE RESTRICT`, impedindo exclusão em cascata;
+- implementa métricas reais de 24h, 7d, 30d e 90d e séries agregadas.
 
-1. Fazer snapshot/backup operacional do projeto Supabase e confirmar que não há migration em execução.
-2. Manter `MONITORING_SCHEDULER_ENABLED=false` durante a janela.
-3. Aplicar a migration 001.
-4. Configurar as variáveis do backend, incluindo `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `ADMIN_SESSION_SECRET`, `ALLOWED_ORIGINS`, `TRUST_PROXY=1` quando houver exatamente um proxy confiável e o agendador ainda em `false`.
-5. Criar ou confirmar um administrador com `app_metadata.role = "admin"` pelo procedimento manual documentado.
-6. Publicar o código do MVP (fora desta tarefa) ainda com o agendador desabilitado.
-7. Validar login, sessão, listagem, CRUD não destrutivo e um check controlado pelo backend.
-8. Aplicar a migration 002.
-9. Revalidar login, sessão, listagem de sites/incidentes, check individual e check em lote; confirmar que `anon`/`authenticated` não acessam as tabelas e que `service_role` continua acessando.
-10. Habilitar `MONITORING_SCHEDULER_ENABLED=true` e reiniciar uma única instância da aplicação.
-11. Confirmar um ciclo devido, o respeito a `check_interval` e a ausência de checks duplicados.
+Ela não apaga histórico. Por segurança, falha antes de criar o índice único se já existirem múltiplos incidentes ativos para o mesmo site; a correção desses registros exige decisão operacional explícita, sem apagar histórico.
 
-Rollback emergencial da 002 deve restaurar temporariamente os grants/policies anteriores somente se a API com service role falhar. Isso reabre a superfície insegura e não deve ser mantido.
+## 004 — alertas webhook
+
+Arquivo: `supabase/migrations/20260901_004_alert_webhooks.sql`.
+
+Cria configuração persistida de webhook e log de entregas com chave idempotente. Não configura nem declara e-mail funcional.
+
+## 005 — cofre de acessos técnicos
+
+Arquivo: `supabase/migrations/20260901_005_technical_credentials_vault.sql`.
+
+Cria `technical_credentials` (vários acessos por site) e `credential_audit_log`.
+Somente ciphertext AES-256-GCM, IV e authentication tag são persistidos como segredo.
+As duas tabelas nascem com RLS habilitada, sem policies e com privilégios revogados
+para `anon`/`authenticated`; apenas `service_role` do backend recebe acesso. A
+migration 002 também foi revisada defensivamente para reconhecer essas e as demais
+tabelas internas caso já existam quando ela for aplicada.
+
+## Ordem recomendada para uma janela futura
+
+1. Criar snapshot/backup do Supabase.
+2. Desabilitar temporariamente o Hostinger Cron (não existe scheduler por `setInterval` no Express).
+3. Verificar se há mais de um incidente ativo por site; não apagar nem resolver automaticamente.
+4. Aplicar 001, 002, 003, 004 e 005, nessa ordem, em ambiente validado.
+5. Configurar `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `ADMIN_SESSION_SECRET`, `MONITOR_CRON_SECRET`, `CREDENTIALS_ENCRYPTION_KEY`, `CREDENTIALS_MASTER_PASSWORD_HASH`, `ALLOWED_ORIGINS` e `TRUST_PROXY` no backend.
+6. Publicar o código em uma ação separada e validar login, página pública, CRUD, check individual, lote, histórico e métricas.
+7. Configurar o Hostinger Cron para `POST /api/internal/monitor/run` com `Authorization: Bearer <MONITOR_CRON_SECRET>` em frequência de até cinco minutos.
+8. Confirmar uma execução em `monitoring_runs`, atualização de `next_check_at` e ausência de checks duplicados.
+9. Confirmar backup seguro e testado da chave do cofre fora do Git, Supabase e frontend.
+
+O endpoint retorna `202` quando outro lease válido já executa o ciclo. O segredo nunca deve usar prefixo `VITE_`, aparecer em URL/query string, logs, respostas ou Git.
+
+## Metodologia de uptime
+
+Para cada janela usa-se `checked_at` real. O denominador contém todos os checks exceto `security_blocked`, porque nesse caso não houve observação externa válida. O numerador contém respostas HTTP recebidas que não foram marcadas como falha de disponibilidade (`incident_eligible=false`); assim 401/403/429, conteúdo ausente e aviso/criticidade preventiva de SSL não contam automaticamente como downtime. HTTP 5xx, timeout, DNS sem resolução, conexão recusada e falhas equivalentes não entram no numerador. A UI mostra “histórico parcial” até existir ao menos um check anterior ao início integral da janela.
+
+## Matriz operacional detalhada
+
+### 001
+
+- **SQL:** `20260831_001_checks_critical_status.sql`.
+- **Impacto/risco:** troca somente a constraint; não altera linhas. Falha se houver
+  status fora da enumeração.
+- **Rollback:** restaurar a constraint anterior somente se nenhuma linha usar
+  `critical`; registros existentes exigem decisão explícita.
+- **Dependência:** tabela inicial `checks`. **Ordem:** primeira.
+
+### 002
+
+- **SQL:** `20260831_002_restrict_direct_api_access.sql`.
+- **Impacto/risco:** bloqueia acesso direto de `anon`/`authenticated`, sem alterar
+  dados. Pode indisponibilizar o painel se o backend `service_role` não estiver pronto.
+- **Rollback:** restaurar temporariamente grants/policies anteriores; isso reabre a
+  superfície insegura e deve ser apenas contingencial.
+- **Dependência:** backend `service_role` previamente validado. **Ordem:** segunda.
+
+### 003
+
+- **SQL:** `20260901_003_monitoring_engine.sql`.
+- **Impacto:** adiciona colunas, tabelas, funções, índices e backfills compatíveis;
+  atualiza `next_check_at`, classifica checks históricos e torna FKs restritivas.
+- **Risco:** falha intencionalmente se houver incidentes ativos duplicados; backfills
+  devem ocorrer em janela monitorada.
+- **Rollback:** preferir snapshot. Desativar RPCs sem remover histórico; não é fornecido
+  rollback destrutivo de colunas/tabelas.
+- **Dependências:** 001, 002, `pgcrypto`, schema inicial. **Ordem:** terceira.
+
+### 004
+
+- **SQL:** `20260901_004_alert_webhooks.sql`.
+- **Impacto/risco:** adiciona configuração e fila de webhook. Baixo risco até existir
+  configuração manual; URL continua protegida contra SSRF.
+- **Rollback:** desabilitar webhook e preservar/exportar entregas. Não remover tabelas
+  sem autorização porque isso apagaria o histórico.
+- **Dependência:** 003 e `handle_updated_at`. **Ordem:** quarta.
+
+### 005
+
+- **SQL:** `20260901_005_technical_credentials_vault.sql`.
+- **Impacto/risco:** adiciona cofre e auditoria. Perder a chave de criptografia torna
+  credenciais potencialmente irrecuperáveis; chave incorreta não altera registros.
+- **Rollback:** desabilitar API/UI e preservar tabelas. Remoção exige exportação
+  criptografada, backup e autorização explícita.
+- **Dependências:** 003, `CREDENTIALS_ENCRYPTION_KEY` e hash da senha mestre.
+  **Ordem:** quinta.
+
+## Índices e limites de escala
+
+A migration 003 prepara índices por `site_id`, `checked_at`, `status`,
+`next_check_at`, incidente ativo, início de execução e expiração do lock. Claims usam
+`FOR UPDATE SKIP LOCKED`, limite máximo de 500 e concorrência de aplicação máxima 5;
+o overview é limitado a 1000 sites. A migration 005 indexa credenciais por site e
+auditoria por site, administrador e timestamp. Histórico e incidentes usam paginação
+com limite máximo 100; acessos normais são limitados a 200 por site.

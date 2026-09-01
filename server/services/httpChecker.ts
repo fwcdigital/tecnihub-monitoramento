@@ -1,5 +1,7 @@
+import dns from 'node:dns/promises';
 import http from 'node:http';
 import https from 'node:https';
+import type { TLSSocket } from 'node:tls';
 import { URL } from 'node:url';
 import {
   normalizeHttpUrl,
@@ -8,7 +10,44 @@ import {
   validateUrlForSSRF
 } from './ssrfProtection';
 
-export type CheckStatus = 'online' | 'warning' | 'critical' | 'offline';
+export type CheckStatus = 'online' | 'warning' | 'critical' | 'offline' | 'security_blocked';
+
+export interface SslDiagnostics {
+  applicable: boolean;
+  valid: boolean | null;
+  hostnameValid: boolean | null;
+  issuer?: string;
+  validFrom?: string;
+  validTo?: string;
+  daysRemaining?: number;
+  expired?: boolean;
+  severity: 'normal' | 'warning' | 'critical' | 'not_applicable' | 'unavailable';
+  error?: string;
+}
+
+export interface DnsDiagnostics {
+  a: string[];
+  aaaa: string[];
+  cname: string[];
+  observedIp?: string;
+}
+
+export interface TrackingEvidence {
+  detected: boolean;
+  foundIds: string[];
+  expectedId?: string;
+  expectedIdFound?: boolean;
+  evidence: string[];
+  confirmation: 'html_evidence_only' | 'not_detected';
+}
+
+export interface TrackingDiagnostics {
+  ga4: TrackingEvidence;
+  gtm: TrackingEvidence;
+  googleAds: TrackingEvidence;
+  metaPixel: TrackingEvidence;
+  rdStation: TrackingEvidence;
+}
 
 export interface CheckExecutionResult {
   status: CheckStatus;
@@ -18,20 +57,51 @@ export interface CheckExecutionResult {
   errorType?: string;
   errorMessage?: string;
   resultMessage: string;
+  observedIp?: string;
+  dns?: DnsDiagnostics;
+  ssl?: SslDiagnostics;
+  expectedContent?: { configured: boolean; found: boolean | null };
+  tracking?: TrackingDiagnostics;
+  wordpress?: Record<string, unknown>;
+  redirectCount: number;
+  incidentEligible: boolean;
 }
 
 interface RawHttpResponse {
   statusCode: number;
   location?: string;
+  body?: string;
+  observedIp?: string;
+  ssl?: SslDiagnostics;
+}
+
+export interface HttpCheckOptions {
+  expectedContent?: string | null;
+  evaluateSsl?: boolean;
+  trackingExpectations?: {
+    ga4?: string | null;
+    gtm?: string | null;
+    googleAds?: string | null;
+    metaPixel?: string | null;
+    rdStation?: boolean;
+  };
+  bodyLimitBytes?: number;
 }
 
 export interface HttpCheckerDependencies {
   validateUrl?: (url: string) => Promise<SSRFValidationResult>;
-  requestUrl?: (url: URL, address: ResolvedAddress, timeoutMs: number) => Promise<RawHttpResponse>;
+  requestUrl?: (
+    url: URL,
+    address: ResolvedAddress,
+    timeoutMs: number,
+    bodyLimitBytes?: number
+  ) => Promise<RawHttpResponse>;
+  resolveCname?: (hostname: string) => Promise<string[]>;
 }
 
 export const DEFAULT_TIMEOUT_MS = 10000;
 export const MAX_REDIRECTS = 5;
+export const DEFAULT_BODY_LIMIT_BYTES = 1024 * 1024;
 
 function messageForClientError(httpCode: number): string {
   if (httpCode === 401) return 'acesso não autorizado/protegido';
@@ -48,87 +118,123 @@ export function classifyHttpStatus(
 ): CheckExecutionResult {
   if (httpCode >= 200 && httpCode <= 399) {
     return {
-      status: 'online',
-      httpStatus: httpCode,
-      responseTime,
-      finalUrl,
-      resultMessage: `Servidor respondendo normalmente (HTTP ${httpCode} em ${responseTime}ms)`
+      status: 'online', httpStatus: httpCode, responseTime, finalUrl,
+      resultMessage: `Servidor respondendo normalmente (HTTP ${httpCode} em ${responseTime}ms)`,
+      redirectCount: 0, incidentEligible: false
     };
   }
-
   if (httpCode >= 400 && httpCode <= 499) {
     const reason = messageForClientError(httpCode);
     return {
-      status: 'warning',
-      httpStatus: httpCode,
-      responseTime,
-      finalUrl,
+      status: 'warning', httpStatus: httpCode, responseTime, finalUrl,
       errorType: `HTTP_${httpCode}`,
       errorMessage: `Servidor retornou HTTP ${httpCode}: ${reason}.`,
-      resultMessage: `Atenção: servidor retornou HTTP ${httpCode} (${reason}).`
+      resultMessage: `Atenção: servidor retornou HTTP ${httpCode} (${reason}).`,
+      redirectCount: 0, incidentEligible: false
     };
   }
-
   if (httpCode >= 500 && httpCode <= 599) {
     return {
-      status: 'critical',
-      httpStatus: httpCode,
-      responseTime,
-      finalUrl,
+      status: 'critical', httpStatus: httpCode, responseTime, finalUrl,
       errorType: `HTTP_${httpCode}`,
       errorMessage: `Erro do servidor remoto (HTTP ${httpCode}).`,
-      resultMessage: `CRÍTICO: servidor retornou erro HTTP ${httpCode}.`
+      resultMessage: `CRÍTICO: servidor retornou erro HTTP ${httpCode}.`,
+      redirectCount: 0, incidentEligible: true
     };
   }
-
   return {
-    status: 'warning',
-    httpStatus: httpCode,
-    responseTime,
-    finalUrl,
+    status: 'warning', httpStatus: httpCode, responseTime, finalUrl,
     errorType: `HTTP_${httpCode}`,
     errorMessage: `Resposta HTTP incomum (${httpCode}).`,
-    resultMessage: `Atenção: resposta HTTP incomum (${httpCode}).`
+    resultMessage: `Atenção: resposta HTTP incomum (${httpCode}).`,
+    redirectCount: 0, incidentEligible: false
+  };
+}
+
+function sslFromSocket(url: URL, socket: TLSSocket): SslDiagnostics {
+  if (url.protocol !== 'https:') {
+    return { applicable: false, valid: null, hostnameValid: null, severity: 'not_applicable' };
+  }
+  const certificate = socket.getPeerCertificate();
+  if (!certificate || !certificate.valid_to) {
+    return {
+      applicable: true, valid: null, hostnameValid: null, severity: 'unavailable',
+      error: 'O servidor não forneceu detalhes utilizáveis do certificado.'
+    };
+  }
+  const validFromDate = new Date(certificate.valid_from);
+  const validToDate = new Date(certificate.valid_to);
+  const now = Date.now();
+  const daysRemaining = Math.ceil((validToDate.getTime() - now) / 86_400_000);
+  const expired = daysRemaining < 0;
+  const severity = expired || daysRemaining <= 7 ? 'critical' : daysRemaining <= 30 ? 'warning' : 'normal';
+  return {
+    applicable: true,
+    valid: socket.authorized && !expired && validFromDate.getTime() <= now,
+    hostnameValid: socket.authorized,
+    issuer: String(certificate.issuer?.O || certificate.issuer?.CN || '') || undefined,
+    validFrom: Number.isFinite(validFromDate.getTime()) ? validFromDate.toISOString() : certificate.valid_from,
+    validTo: Number.isFinite(validToDate.getTime()) ? validToDate.toISOString() : certificate.valid_to,
+    daysRemaining, expired, severity,
+    error: socket.authorized ? undefined : socket.authorizationError?.toString()
   };
 }
 
 function performPinnedRequest(
   url: URL,
   address: ResolvedAddress,
-  timeoutMs: number
+  timeoutMs: number,
+  bodyLimitBytes = DEFAULT_BODY_LIMIT_BYTES
 ): Promise<RawHttpResponse> {
   return new Promise((resolve, reject) => {
     const transport = url.protocol === 'https:' ? https : http;
     const defaultPort = url.protocol === 'https:' ? 443 : 80;
     const hostname = url.hostname.replace(/^\[|\]$/g, '');
     const hostHeader = url.port ? `${hostname}:${url.port}` : hostname;
-
-    const request = transport.request(
-      {
-        protocol: url.protocol,
-        hostname: address.address,
-        family: address.family,
-        port: url.port ? Number(url.port) : defaultPort,
-        path: `${url.pathname}${url.search}`,
-        method: 'GET',
-        servername: url.protocol === 'https:' ? hostname : undefined,
-        rejectUnauthorized: true,
-        headers: {
-          Host: hostHeader,
-          'User-Agent': 'TecnihubMonitoring/1.0 (+https://tecnihub.com.br)',
-          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
-          Connection: 'close'
-        }
-      },
-      (response) => {
-        const statusCode = response.statusCode || 0;
-        const location = response.headers.location;
-        response.resume();
-        resolve({ statusCode, location });
+    const request = transport.request({
+      protocol: url.protocol,
+      hostname: address.address,
+      family: address.family,
+      port: url.port ? Number(url.port) : defaultPort,
+      path: `${url.pathname}${url.search}`,
+      method: 'GET',
+      servername: url.protocol === 'https:' ? hostname : undefined,
+      rejectUnauthorized: true,
+      headers: {
+        Host: hostHeader,
+        'User-Agent': 'TecnihubMonitoring/2.0 (+https://tecnihub.com.br)',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+        Connection: 'close'
       }
-    );
-
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      let storedBytes = 0;
+      let completed = false;
+      const finish = () => {
+        if (completed) return;
+        completed = true;
+        resolve({
+          statusCode: response.statusCode || 0,
+          location: response.headers.location,
+          body: Buffer.concat(chunks).toString('utf8'),
+          observedIp: response.socket.remoteAddress?.replace(/^::ffff:/, ''),
+          ssl: sslFromSocket(url, response.socket as TLSSocket)
+        });
+      };
+      response.on('data', (chunk: Buffer | string) => {
+        if (storedBytes >= bodyLimitBytes) return;
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        const remaining = bodyLimitBytes - storedBytes;
+        chunks.push(buffer.subarray(0, remaining));
+        storedBytes += Math.min(buffer.length, remaining);
+        if (storedBytes >= bodyLimitBytes) {
+          finish();
+          response.destroy();
+        }
+      });
+      response.on('end', finish);
+    });
     request.setTimeout(timeoutMs, () => {
       const timeoutError = new Error(`Tempo limite de ${timeoutMs}ms excedido.`) as Error & { code?: string };
       timeoutError.code = 'ETIMEDOUT';
@@ -139,82 +245,122 @@ function performPinnedRequest(
   });
 }
 
-function mapConnectionError(error: any, responseTime: number, finalUrl: string): CheckExecutionResult {
-  const code = error?.code || error?.cause?.code || 'CONNECTION_ERROR';
-
-  if (code === 'ETIMEDOUT' || code === 'ESOCKETTIMEDOUT') {
-    return {
-      status: 'offline',
-      httpStatus: null,
-      responseTime,
-      finalUrl,
-      errorType: 'TIMEOUT',
-      errorMessage: 'O servidor não respondeu dentro do tempo limite.',
-      resultMessage: 'OFFLINE: timeout ao aguardar resposta do servidor.'
-    };
-  }
-
-  if (code === 'ECONNREFUSED') {
-    return {
-      status: 'offline',
-      httpStatus: null,
-      responseTime,
-      finalUrl,
-      errorType: 'CONNECTION_REFUSED',
-      errorMessage: 'O host recusou a conexão.',
-      resultMessage: 'OFFLINE: conexão recusada pelo host.'
-    };
-  }
-
+function tlsErrorDiagnostics(code: string, message?: string): SslDiagnostics | undefined {
   const tlsCodes = new Set([
-    'CERT_HAS_EXPIRED',
-    'DEPTH_ZERO_SELF_SIGNED_CERT',
-    'ERR_TLS_CERT_ALTNAME_INVALID',
-    'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
+    'CERT_HAS_EXPIRED', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'ERR_TLS_CERT_ALTNAME_INVALID',
+    'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'SELF_SIGNED_CERT_IN_CHAIN'
   ]);
-  if (tlsCodes.has(code)) {
-    return {
-      status: 'offline',
-      httpStatus: null,
-      responseTime,
-      finalUrl,
-      errorType: 'TLS_ERROR',
-      errorMessage: error?.message || 'Falha ao validar o certificado TLS.',
-      resultMessage: 'OFFLINE: não foi possível estabelecer uma conexão HTTPS válida.'
-    };
-  }
-
+  if (!tlsCodes.has(code)) return undefined;
   return {
-    status: 'offline',
-    httpStatus: null,
-    responseTime,
-    finalUrl,
-    errorType: code,
+    applicable: true, valid: false,
+    hostnameValid: code === 'ERR_TLS_CERT_ALTNAME_INVALID' ? false : null,
+    expired: code === 'CERT_HAS_EXPIRED', severity: 'critical', error: message || code
+  };
+}
+
+function mapConnectionError(
+  error: any,
+  responseTime: number,
+  finalUrl: string,
+  dnsDiagnostics?: DnsDiagnostics
+): CheckExecutionResult {
+  const code = error?.code || error?.cause?.code || 'CONNECTION_ERROR';
+  const common = {
+    httpStatus: null, responseTime, finalUrl, redirectCount: 0, incidentEligible: true,
+    dns: dnsDiagnostics, observedIp: dnsDiagnostics?.observedIp,
+    ssl: tlsErrorDiagnostics(code, error?.message)
+  } as const;
+  if (code === 'ETIMEDOUT' || code === 'ESOCKETTIMEDOUT') return {
+    ...common, status: 'offline', errorType: 'TIMEOUT',
+    errorMessage: 'O servidor não respondeu dentro do tempo limite.',
+    resultMessage: 'OFFLINE: timeout ao aguardar resposta do servidor.'
+  };
+  if (code === 'ECONNREFUSED') return {
+    ...common, status: 'offline', errorType: 'CONNECTION_REFUSED',
+    errorMessage: 'O host recusou a conexão.', resultMessage: 'OFFLINE: conexão recusada pelo host.'
+  };
+  if (common.ssl) return {
+    ...common, status: 'critical', errorType: 'TLS_ERROR',
+    errorMessage: error?.message || 'Falha ao validar o certificado TLS.',
+    resultMessage: 'CRÍTICO: não foi possível estabelecer uma conexão HTTPS com certificado válido.'
+  };
+  return {
+    ...common, status: 'offline', errorType: code,
     errorMessage: error?.message || 'Falha ao conectar no host remoto.',
     resultMessage: `OFFLINE: falha real de conexão (${code}).`
   };
 }
 
+function uniqueMatches(body: string, expression: RegExp): string[] {
+  return [...new Set(Array.from(body.matchAll(expression), (match) => match[1] || match[0]))];
+}
+
+function evidence(
+  body: string,
+  ids: string[],
+  markers: Array<{ pattern: RegExp; label: string }>,
+  expectedId?: string | null
+): TrackingEvidence {
+  const evidenceLabels = markers.filter(({ pattern }) => pattern.test(body)).map(({ label }) => label);
+  const detected = ids.length > 0 || evidenceLabels.length > 0;
+  const normalizedExpected = expectedId?.trim();
+  return {
+    detected, foundIds: ids, expectedId: normalizedExpected || undefined,
+    expectedIdFound: normalizedExpected ? body.toLowerCase().includes(normalizedExpected.toLowerCase()) : undefined,
+    evidence: evidenceLabels, confirmation: detected ? 'html_evidence_only' : 'not_detected'
+  };
+}
+
+export function detectTrackingEvidence(
+  body: string,
+  expectations: HttpCheckOptions['trackingExpectations'] = {}
+): TrackingDiagnostics {
+  return {
+    gtm: evidence(body, uniqueMatches(body, /\b(GTM-[A-Z0-9]+)\b/gi), [
+      { pattern: /googletagmanager\.com\/gtm\.js/i, label: 'script_gtm' }
+    ], expectations?.gtm),
+    ga4: evidence(body, uniqueMatches(body, /\b(G-[A-Z0-9]{5,})\b/gi), [
+      { pattern: /googletagmanager\.com\/gtag\/js/i, label: 'script_gtag' },
+      { pattern: /gtag\s*\(\s*['"]config['"]/i, label: 'config_gtag' }
+    ], expectations?.ga4),
+    googleAds: evidence(body, uniqueMatches(body, /\b(AW-\d+)\b/gi), [
+      { pattern: /googleadservices\.com|googleads\.g\.doubleclick\.net/i, label: 'script_google_ads' }
+    ], expectations?.googleAds),
+    metaPixel: evidence(body, uniqueMatches(body, /fbq\s*\(\s*['"]init['"]\s*,\s*['"](\d+)['"]/gi), [
+      { pattern: /connect\.facebook\.net\/.+\/fbevents\.js/i, label: 'script_meta_pixel' }
+    ], expectations?.metaPixel),
+    rdStation: evidence(body, [], [
+      { pattern: /rdstation\.com|rdstation-static|rdstation_forms/i, label: 'script_rd_station' }
+    ])
+  };
+}
+
+function hasMissingExpectedTracking(tracking: TrackingDiagnostics): boolean {
+  return Object.values(tracking).some((tool) => tool.expectedId && tool.expectedIdFound === false);
+}
+
+async function getCnameRecords(hostname: string, dependencies: HttpCheckerDependencies): Promise<string[]> {
+  if (dependencies.resolveCname) {
+    try { return await dependencies.resolveCname(hostname); } catch { return []; }
+  }
+  if (dependencies.validateUrl) return [];
+  try { return await dns.resolveCname(hostname); } catch { return []; }
+}
+
 export async function executeHttpCheck(
   targetUrl: string,
   timeoutMs = DEFAULT_TIMEOUT_MS,
-  dependencies: HttpCheckerDependencies = {}
+  dependencies: HttpCheckerDependencies = {},
+  options: HttpCheckOptions = {}
 ): Promise<CheckExecutionResult> {
   let currentUrl: string;
-  try {
-    currentUrl = normalizeHttpUrl(targetUrl);
-  } catch {
+  try { currentUrl = normalizeHttpUrl(targetUrl); } catch {
     return {
-      status: 'offline',
-      httpStatus: null,
-      responseTime: 0,
-      finalUrl: targetUrl,
-      errorType: 'INVALID_URL',
-      errorMessage: 'URL com formato inválido.',
-      resultMessage: 'OFFLINE: URL inválida e não verificável.'
+      status: 'offline', httpStatus: null, responseTime: 0, finalUrl: targetUrl,
+      errorType: 'INVALID_URL', errorMessage: 'URL com formato inválido.',
+      resultMessage: 'OFFLINE: URL inválida e não verificável.', redirectCount: 0, incidentEligible: true
     };
   }
-
   const validateUrl = dependencies.validateUrl || validateUrlForSSRF;
   const requestUrl = dependencies.requestUrl || performPinnedRequest;
   const startedAt = process.hrtime.bigint();
@@ -222,62 +368,92 @@ export async function executeHttpCheck(
   for (let redirectCount = 0; redirectCount <= MAX_REDIRECTS; redirectCount++) {
     const validation = await validateUrl(currentUrl);
     const elapsedMs = () => Math.round(Number(process.hrtime.bigint() - startedAt) / 1_000_000);
-
     if (!validation.valid || !validation.resolvedAddresses?.length) {
       const isSecurityBlock = validation.errorType?.startsWith('SSRF_');
       const isDnsFailure = validation.errorType?.startsWith('DNS_');
       return {
-        status: 'offline',
-        httpStatus: null,
-        responseTime: elapsedMs(),
-        finalUrl: currentUrl,
+        status: isSecurityBlock ? 'security_blocked' : 'offline', httpStatus: null,
+        responseTime: elapsedMs(), finalUrl: currentUrl,
         errorType: isSecurityBlock ? 'SSRF_BLOCKED' : validation.errorType || 'INVALID_URL',
         errorMessage: validation.error,
-        resultMessage: isSecurityBlock
-          ? `Bloqueado por segurança: ${validation.error}`
-          : isDnsFailure
-            ? `OFFLINE: falha de DNS. ${validation.error}`
-            : `OFFLINE: ${validation.error || 'URL inválida.'}`
+        resultMessage: isSecurityBlock ? `Bloqueado por segurança: ${validation.error}`
+          : isDnsFailure ? `OFFLINE: falha de DNS. ${validation.error}`
+            : `OFFLINE: ${validation.error || 'URL inválida.'}`,
+        redirectCount, incidentEligible: !isSecurityBlock
       };
     }
-
     const parsedUrl = new URL(currentUrl);
+    const selectedAddress = validation.resolvedAddresses[0];
+    const dnsDiagnostics: DnsDiagnostics = {
+      a: validation.resolvedAddresses.filter((record) => record.family === 4).map((record) => record.address),
+      aaaa: validation.resolvedAddresses.filter((record) => record.family === 6).map((record) => record.address),
+      cname: await getCnameRecords(parsedUrl.hostname, dependencies), observedIp: selectedAddress.address
+    };
     const remainingTimeout = Math.max(1, timeoutMs - elapsedMs());
-    if (remainingTimeout <= 1) return mapConnectionError({ code: 'ETIMEDOUT' }, elapsedMs(), currentUrl);
-
+    if (remainingTimeout <= 1) return mapConnectionError({ code: 'ETIMEDOUT' }, elapsedMs(), currentUrl, dnsDiagnostics);
     try {
-      // Pin the connection to the IP that passed SSRF validation. The HTTP client
-      // never performs a second DNS lookup, closing the DNS-rebinding window.
-      const response = await requestUrl(parsedUrl, validation.resolvedAddresses[0], remainingTimeout);
-
+      const response = await requestUrl(parsedUrl, selectedAddress, remainingTimeout, options.bodyLimitBytes || DEFAULT_BODY_LIMIT_BYTES);
       if (response.statusCode >= 300 && response.statusCode <= 399 && response.location) {
-        if (redirectCount === MAX_REDIRECTS) {
-          return {
-            status: 'warning',
-            httpStatus: response.statusCode,
-            responseTime: elapsedMs(),
-            finalUrl: currentUrl,
-            errorType: 'TOO_MANY_REDIRECTS',
-            errorMessage: `Excesso de redirecionamentos (mais de ${MAX_REDIRECTS} saltos).`,
-            resultMessage: `Atenção: excesso de redirecionamentos (HTTP ${response.statusCode}).`
-          };
-        }
+        if (redirectCount === MAX_REDIRECTS) return {
+          status: 'warning', httpStatus: response.statusCode, responseTime: elapsedMs(), finalUrl: currentUrl,
+          errorType: 'TOO_MANY_REDIRECTS',
+          errorMessage: `Excesso de redirecionamentos (mais de ${MAX_REDIRECTS} saltos).`,
+          resultMessage: `Atenção: excesso de redirecionamentos (HTTP ${response.statusCode}).`,
+          observedIp: response.observedIp || selectedAddress.address, dns: dnsDiagnostics, ssl: response.ssl,
+          redirectCount, incidentEligible: false
+        };
         currentUrl = new URL(response.location, currentUrl).toString();
         continue;
       }
+      const result = classifyHttpStatus(response.statusCode, elapsedMs(), currentUrl);
+      const body = response.body || '';
+      const expected = options.expectedContent?.trim();
+      const expectedFound = expected ? body.toLocaleLowerCase().includes(expected.toLocaleLowerCase()) : null;
+      const tracking = detectTrackingEvidence(body, options.trackingExpectations);
+      result.observedIp = response.observedIp || selectedAddress.address;
+      result.dns = { ...dnsDiagnostics, observedIp: result.observedIp };
+      result.ssl = response.ssl;
+      result.expectedContent = { configured: Boolean(expected), found: expectedFound };
+      result.tracking = tracking;
+      result.wordpress = {
+        detected: /wp-content|wp-includes|<meta[^>]+generator[^>]+wordpress/i.test(body),
+        homepage: { httpStatus: response.statusCode, available: response.statusCode >= 200 && response.statusCode <= 499 },
+        maintenanceDetected: /briefly unavailable for scheduled maintenance|modo de manuten[cç][aã]o|maintenance mode/i.test(body),
+        criticalErrorDetected: /there has been a critical error on this website|houve um erro cr[ií]tico neste site/i.test(body)
+      };
+      result.redirectCount = redirectCount;
 
-      return classifyHttpStatus(response.statusCode, elapsedMs(), currentUrl);
+      if (result.status === 'online' && expected && !expectedFound) {
+        result.status = 'warning'; result.errorType = 'EXPECTED_CONTENT_MISSING';
+        result.errorMessage = 'O servidor respondeu, mas o conteúdo esperado não foi encontrado no HTML analisado.';
+        result.resultMessage = 'Atenção: HTTP válido sem o conteúdo esperado.';
+      } else if (result.status === 'online' && hasMissingExpectedTracking(tracking)) {
+        result.status = 'warning'; result.errorType = 'EXPECTED_TRACKING_TAG_MISSING';
+        result.errorMessage = 'Uma ou mais tags configuradas não foram encontradas no HTML analisado.';
+        result.resultMessage = 'Atenção: tag esperada não detectada; funcionamento não foi confirmado.';
+      }
+      if (options.evaluateSsl !== false && result.status === 'online' && response.ssl?.severity === 'warning') {
+        result.status = 'warning'; result.errorType = 'SSL_EXPIRING';
+        result.errorMessage = `O certificado TLS expira em ${response.ssl.daysRemaining} dia(s).`;
+        result.resultMessage = `Atenção: certificado TLS próximo do vencimento (${response.ssl.daysRemaining} dias).`;
+      } else if (options.evaluateSsl !== false && (result.status === 'online' || result.status === 'warning') && response.ssl?.severity === 'critical') {
+        result.status = 'critical'; result.errorType = response.ssl.expired ? 'SSL_EXPIRED' : 'SSL_EXPIRING_CRITICAL';
+        result.errorMessage = response.ssl.expired ? 'O certificado TLS está expirado.'
+          : `O certificado TLS expira em ${response.ssl.daysRemaining} dia(s).`;
+        result.resultMessage = response.ssl.expired ? 'CRÍTICO: certificado TLS expirado.'
+          : `CRÍTICO: certificado TLS expira em ${response.ssl.daysRemaining} dia(s).`;
+        result.incidentEligible = Boolean(response.ssl.expired);
+      }
+      return result;
     } catch (error: any) {
-      return mapConnectionError(error, elapsedMs(), currentUrl);
+      return mapConnectionError(error, elapsedMs(), currentUrl, dnsDiagnostics);
     }
   }
-
   return {
-    status: 'warning',
-    httpStatus: null,
+    status: 'warning', httpStatus: null,
     responseTime: Math.round(Number(process.hrtime.bigint() - startedAt) / 1_000_000),
-    finalUrl: currentUrl,
-    errorType: 'UNKNOWN',
-    resultMessage: 'Atenção: condição inesperada durante a verificação.'
+    finalUrl: currentUrl, errorType: 'UNKNOWN',
+    resultMessage: 'Atenção: condição inesperada durante a verificação.',
+    redirectCount: MAX_REDIRECTS, incidentEligible: false
   };
 }

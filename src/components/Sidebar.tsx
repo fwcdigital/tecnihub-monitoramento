@@ -10,7 +10,8 @@ import {
   ChevronRight,
   ShieldCheck,
   X,
-  LogOut
+  LogOut,
+  KeyRound
 } from 'lucide-react';
 import { NavigationTab } from '../types';
 import { TecnihubLogo } from './TecnihubLogo';
@@ -69,6 +70,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {totalSitesCount}
         </span>
       )
+    },
+    {
+      id: 'accesses' as NavigationTab,
+      label: 'Acessos',
+      icon: KeyRound,
+      badge: null
     },
     {
       id: 'incidents' as NavigationTab,

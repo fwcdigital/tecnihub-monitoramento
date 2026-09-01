@@ -40,6 +40,7 @@ export const Header: React.FC<HeaderProps> = ({
   const tabTitles: Record<NavigationTab, { title: string; subtitle: string }> = {
     dashboard: { title: 'Dashboard Geral', subtitle: 'Dados operacionais persistidos' },
     sites: { title: 'Todos os Sites', subtitle: 'Inventário completo de domínios e serviços' },
+    accesses: { title: 'Acessos Técnicos', subtitle: 'Cofre administrativo vinculado aos sites' },
     incidents: { title: 'Incidentes', subtitle: 'Histórico e anomalias ativas' },
     alerts: { title: 'Alertas & Canais', subtitle: 'Regras de notificação e gatilhos' },
     reports: { title: 'Relatórios Operacionais', subtitle: 'Métricas de disponibilidade e estabilidade' },

@@ -24,7 +24,9 @@ export const ConfirmDeleteModal: React.FC<ConfirmDeleteModalProps> = ({
   }, [isOpen, site?.id]);
 
   if (!isOpen || !site) return null;
-  const confirmationMatches = confirmation.trim().toLowerCase() === site.domain.toLowerCase();
+  const normalizedConfirmation = confirmation.trim().toLowerCase();
+  const confirmationMatches = normalizedConfirmation === site.domain.trim().toLowerCase()
+    || normalizedConfirmation === site.siteName.trim().toLowerCase();
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-xs">
@@ -69,7 +71,7 @@ export const ConfirmDeleteModal: React.FC<ConfirmDeleteModalProps> = ({
 
           <div className="space-y-1.5">
             <label className="block text-[11px] text-neutral-300 font-mono">
-              Para confirmar, digite <strong className="text-white">{site.domain}</strong>
+              Para confirmar, digite <strong className="text-white">{site.domain}</strong> ou <strong className="text-white">{site.siteName}</strong>
             </label>
             <input
               type="text"

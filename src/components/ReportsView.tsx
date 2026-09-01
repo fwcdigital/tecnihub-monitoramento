@@ -36,18 +36,23 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ sites, incidents, onSe
     return total + Math.floor((end - start) / 60_000);
   }, 0), [periodIncidents, since]);
 
-  const avgUptime30d = useMemo(() => {
-    if (period !== 30) return null;
-    const values = sites.map((site) => site.uptime30d).filter((value): value is number => value !== null);
-    return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
-  }, [period, sites]);
-
-  const recentResponseValues = useMemo(() => sites.flatMap((site) => site.checksHistory)
-    .filter((check) => new Date(check.checkedAt).getTime() >= since && check.responseTime > 0)
-    .map((check) => check.responseTime), [sites, since]);
-  const avgRecentResponse = recentResponseValues.length
-    ? recentResponseValues.reduce((sum, value) => sum + value, 0) / recentResponseValues.length
-    : null;
+  const metricKey = `${period}d` as '7d' | '30d' | '90d';
+  const periodMetrics = sites.map((site) => site.metrics?.[metricKey]).filter(Boolean);
+  const totalMetricChecks = periodMetrics.reduce((sum, metric) => sum + Number(metric!.totalChecks || 0), 0);
+  const totalAvailableChecks = periodMetrics.reduce((sum, metric) => sum + Number(metric!.availableChecks || 0), 0);
+  const uptime = totalMetricChecks > 0 ? (totalAvailableChecks / totalMetricChecks) * 100 : null;
+  const responseSamples = periodMetrics.reduce((sum, metric) => sum + Number(metric!.responseSamples || 0), 0);
+  const responseWeightedTotal = periodMetrics.reduce(
+    (sum, metric) => sum + Number(metric!.avgResponseMs || 0) * Number(metric!.responseSamples || 0), 0
+  );
+  const avgRecentResponse = responseSamples > 0 ? responseWeightedTotal / responseSamples / 1000 : null;
+  const partialMetricSites = periodMetrics.filter((metric) => !metric!.hasFullWindow).length;
+  const statusCounts = {
+    online: sites.filter((site) => site.status === 'online').length,
+    warning: sites.filter((site) => site.status === 'warning' || site.status === 'security_blocked').length,
+    critical: sites.filter((site) => site.status === 'critical').length,
+    offline: sites.filter((site) => site.status === 'offline').length
+  };
 
   const chartData = useMemo(() => {
     const bucketCount = period === 7 ? 7 : period === 30 ? 5 : 3;
@@ -89,12 +94,22 @@ export const ReportsView: React.FC<ReportsViewProps> = ({ sites, incidents, onSe
         </div>
       </div>
 
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-2 sm:gap-2.5">
+        {[
+          { label: 'Total de sites', value: sites.length },
+          { label: 'Online', value: statusCounts.online },
+          { label: 'Warning', value: statusCounts.warning },
+          { label: 'Critical', value: statusCounts.critical },
+          { label: 'Offline', value: statusCounts.offline }
+        ].map((card) => <div key={card.label} className="p-3 rounded bg-[#0a0a0a] border border-[#1e1e1e]"><span className="text-[9px] font-mono uppercase text-neutral-400">{card.label}</span><span className="text-xl font-bold font-mono text-white block mt-1">{card.value}</span></div>)}
+      </div>
+
       <div className="grid grid-cols-2 md:grid-cols-4 gap-2 sm:gap-2.5">
         {[
-          { label: 'Uptime médio', value: avgUptime30d === null ? (period === 30 ? 'Sem dados suficientes' : 'Indisponível') : `${avgUptime30d.toFixed(2)}%`, note: period === 30 ? 'Checks dos últimos 30 dias' : 'Disponível somente para 30 dias' },
+          { label: 'Uptime consolidado', value: uptime === null ? 'Sem dados suficientes' : `${uptime.toFixed(2)}%`, note: `${totalMetricChecks} checks elegíveis; ${partialMetricSites ? `${partialMetricSites} site(s) com histórico parcial` : 'janela completa'}` },
           { label: 'Total de incidentes', value: String(periodIncidents.length), note: 'Ocorrências persistidas' },
           { label: 'Indisponibilidade total', value: formatMinutes(downtimeMinutes), note: 'Duração dos incidentes' },
-          { label: 'Resposta média', value: avgRecentResponse === null ? 'Sem dados suficientes' : `${avgRecentResponse.toFixed(2)}s`, note: `${recentResponseValues.length} checks reais carregados` }
+          { label: 'Resposta média', value: avgRecentResponse === null ? 'Sem dados suficientes' : `${avgRecentResponse.toFixed(2)}s`, note: `${responseSamples} medições reais` }
         ].map((card) => (
           <div key={card.label} className="p-3 rounded bg-[#0a0a0a] border border-[#1e1e1e]">
             <span className="text-[9px] font-mono uppercase tracking-wider text-neutral-400 font-semibold">{card.label}</span>

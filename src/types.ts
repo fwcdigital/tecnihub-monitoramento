@@ -1,4 +1,4 @@
-export type SiteStatus = 'online' | 'warning' | 'critical' | 'offline' | 'paused' | 'unknown';
+export type SiteStatus = 'online' | 'warning' | 'critical' | 'offline' | 'security_blocked' | 'paused' | 'unknown';
 
 export type IncidentSeverity = 'critical' | 'warning' | 'info';
 
@@ -10,11 +10,39 @@ export interface CheckRecord {
   id: string;
   timestamp: string;
   checkedAt: string;
-  status: 'online' | 'warning' | 'critical' | 'offline';
+  status: 'online' | 'warning' | 'critical' | 'offline' | 'security_blocked';
   httpCode: number | string;
   responseTime: number; // in seconds
   result: string;
   expectedContentFound?: boolean;
+  errorType?: string;
+  errorMessage?: string;
+  incidentId?: string;
+  observedIp?: string;
+}
+
+export interface PeriodMetrics {
+  totalChecks: number;
+  availableChecks: number;
+  uptimePercent: number | null;
+  avgResponseMs: number | null;
+  responseSamples: number;
+  minResponseMs: number | null;
+  maxResponseMs: number | null;
+  firstCheckAt: string | null;
+  windowStart: string;
+  hasFullWindow: boolean;
+}
+
+export type SiteMetrics = Partial<Record<'24h' | '7d' | '30d' | '90d', PeriodMetrics>>;
+
+export interface MonitoringSeriesPoint {
+  bucket: string;
+  total_checks: number;
+  available_checks: number;
+  avg_response_ms: number | null;
+  min_response_ms: number | null;
+  max_response_ms: number | null;
 }
 
 export type TrackingStatusColor = 'green' | 'yellow' | 'red' | 'gray';
@@ -65,6 +93,7 @@ export interface Site {
   frequency: MonitoringFrequency;
   status: SiteStatus;
   uptime30d: number | null;
+  uptime30dReliable?: boolean;
   responseTime: number | null;
   avgResponseTime: number | null;
   sslValid: boolean | null;
@@ -95,6 +124,11 @@ export interface Site {
   consecutiveFailures: number;
   createdAt: string;
   updatedAt?: string;
+  metrics?: SiteMetrics;
+  dns?: { a?: string[]; aaaa?: string[]; cname?: string[]; observedIp?: string };
+  ssl?: Record<string, any> | null;
+  domainInfo?: Record<string, any> | null;
+  wordpress?: Record<string, any> | null;
 }
 
 export interface DbSite {
@@ -107,6 +141,9 @@ export interface DbSite {
   is_wordpress: boolean;
   is_active: boolean;
   check_interval: string;
+  monitor_response_time?: boolean;
+  monitor_ssl?: boolean;
+  monitor_domain?: boolean;
   expected_content?: string | null;
   expected_ga4_id?: string | null;
   expected_gtm_id?: string | null;
@@ -116,18 +153,33 @@ export interface DbSite {
   uses_rd_station: boolean;
   created_at: string;
   updated_at: string;
+  last_checked_at?: string | null;
+  next_check_at?: string | null;
+  consecutive_failures?: number;
+  consecutive_successes?: number;
+  monitoring_state?: string;
 }
 
 export interface DbCheck {
   id: string;
   site_id: string;
   checked_at: string;
-  status: 'online' | 'warning' | 'critical' | 'offline';
+  status: 'online' | 'warning' | 'critical' | 'offline' | 'security_blocked';
   http_status: number | null;
   response_time: number | null;
   final_url?: string | null;
   error_type?: string | null;
   error_message?: string | null;
+  result_message?: string | null;
+  incident_id?: string | null;
+  observed_ip?: string | null;
+  dns_records?: Record<string, any> | null;
+  ssl?: Record<string, any> | null;
+  expected_content_found?: boolean | null;
+  wordpress?: Record<string, any> | null;
+  domain_rdap?: Record<string, any> | null;
+  redirect_count?: number;
+  diagnostics?: Record<string, any> | null;
 }
 
 export interface DbIncident {
@@ -141,6 +193,10 @@ export interface DbIncident {
   resolved_at?: string | null;
   status: 'active' | 'resolved';
   created_at: string;
+  duration_seconds?: number | null;
+  reason?: string | null;
+  failed_checks_count?: number;
+  sites?: { client_name: string; name: string; url: string; domain: string } | null;
 }
 
 export type IncidentType =
@@ -217,4 +273,36 @@ export interface FalseAlarmConfig {
   autoResolveAfterRecoveries: number; // e.g. 2
 }
 
-export type NavigationTab = 'dashboard' | 'sites' | 'incidents' | 'alerts' | 'reports' | 'settings' | 'site-detail';
+export type CredentialType = 'WORDPRESS' | 'HOSPEDAGEM' | 'FTP' | 'SFTP' | 'OUTROS';
+
+export interface TechnicalCredential {
+  id: string;
+  siteId: string;
+  type: CredentialType;
+  serviceName: string | null;
+  provider: string | null;
+  url: string | null;
+  username: string | null;
+  protocol: 'FTP' | 'SFTP' | null;
+  host: string | null;
+  port: number | null;
+  notes: string | null;
+  password: string;
+  hasPassword: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TechnicalCredentialPayload {
+  type: CredentialType;
+  serviceName?: string;
+  provider?: string;
+  url?: string;
+  username?: string;
+  host?: string;
+  port?: number | '';
+  notes?: string;
+  password?: string;
+}
+
+export type NavigationTab = 'dashboard' | 'sites' | 'accesses' | 'incidents' | 'alerts' | 'reports' | 'settings' | 'site-detail';

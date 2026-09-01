@@ -3,10 +3,11 @@ import { createServer } from 'node:http';
 import { after, before, describe, it } from 'node:test';
 import { AddressInfo } from 'node:net';
 import { mapWithConcurrency } from './concurrency';
-import { classifyHttpStatus, executeHttpCheck } from './httpChecker';
+import { classifyHttpStatus, detectTrackingEvidence, executeHttpCheck } from './httpChecker';
 import { validateUrlForSSRF } from './ssrfProtection';
 import { determineIncidentTransition, processSiteCheck } from './siteCheckService';
-import { isSiteDue } from './monitoringScheduler';
+import { isSiteDue, runMonitoringCycle } from './monitoringScheduler';
+import { buildEvents } from './webhookAlertService';
 import { mapDbSiteToSite } from '../../src/services/siteService';
 import type { DbCheck, DbSite } from '../../src/types';
 
@@ -94,8 +95,77 @@ describe('proteção SSRF', () => {
     });
 
     assert.equal(requests, 1);
+    assert.equal(result.status, 'security_blocked');
     assert.equal(result.errorType, 'SSRF_BLOCKED');
     assert.match(result.resultMessage, /Bloqueado por segurança/);
+  });
+});
+
+describe('diagnósticos reais do HTML e TLS', () => {
+  it('gera warning quando o conteúdo esperado não aparece em HTTP 200', async () => {
+    const result = await executeHttpCheck('https://content.example', 1000, {
+      validateUrl: async () => ({ valid: true, resolvedAddresses: [{ address: '93.184.216.34', family: 4 }] }),
+      requestUrl: async () => ({ statusCode: 200, body: '<html>conteúdo real</html>' })
+    }, { expectedContent: 'texto obrigatório' });
+    assert.equal(result.status, 'warning');
+    assert.equal(result.errorType, 'EXPECTED_CONTENT_MISSING');
+    assert.equal(result.expectedContent?.found, false);
+    assert.equal(result.incidentEligible, false);
+  });
+
+  it('detecta IDs de tags como evidência sem afirmar funcionamento', () => {
+    const tracking = detectTrackingEvidence(`
+      <script src="https://www.googletagmanager.com/gtm.js?id=GTM-ABC123"></script>
+      <script>gtag('config', 'G-ABCDEF123'); fbq('init', '1234567890');</script>
+    `, { gtm: 'GTM-ABC123', ga4: 'G-ABCDEF123' });
+    assert.equal(tracking.gtm.detected, true);
+    assert.equal(tracking.gtm.expectedIdFound, true);
+    assert.equal(tracking.gtm.confirmation, 'html_evidence_only');
+    assert.equal(tracking.ga4.detected, true);
+    assert.equal(tracking.metaPixel.detected, true);
+  });
+
+  it('classifica SSL a sete dias como crítico sem criar downtime por si só', async () => {
+    const result = await executeHttpCheck('https://ssl.example', 1000, {
+      validateUrl: async () => ({ valid: true, resolvedAddresses: [{ address: '93.184.216.34', family: 4 }] }),
+      requestUrl: async () => ({
+        statusCode: 200,
+        body: '<html>ok</html>',
+        observedIp: '93.184.216.34',
+        ssl: { applicable: true, valid: true, hostnameValid: true, daysRemaining: 7, severity: 'critical' }
+      })
+    });
+    assert.equal(result.status, 'critical');
+    assert.equal(result.incidentEligible, false);
+    assert.equal(result.observedIp, '93.184.216.34');
+  });
+
+  it('respeita a configuração persistida que desativa alertas preventivos de SSL', async () => {
+    const result = await executeHttpCheck('https://ssl.example', 1000, {
+      validateUrl: async () => ({ valid: true, resolvedAddresses: [{ address: '93.184.216.34', family: 4 }] }),
+      requestUrl: async () => ({
+        statusCode: 200,
+        body: '<html>ok</html>',
+        observedIp: '93.184.216.34',
+        ssl: { applicable: true, valid: true, hostnameValid: true, daysRemaining: 2, severity: 'critical' }
+      })
+    }, { evaluateSsl: false });
+    assert.equal(result.status, 'online');
+    assert.equal(result.incidentEligible, false);
+  });
+
+  it('classifica falha de handshake TLS como crítica, não como falha DNS', async () => {
+    const result = await executeHttpCheck('https://tls.example', 1000, {
+      validateUrl: async () => ({ valid: true, resolvedAddresses: [{ address: '93.184.216.34', family: 4 }] }),
+      requestUrl: async () => {
+        const error = new Error('certificate has expired') as Error & { code?: string };
+        error.code = 'CERT_HAS_EXPIRED';
+        throw error;
+      }
+    });
+    assert.equal(result.status, 'critical');
+    assert.equal(result.errorType, 'TLS_ERROR');
+    assert.equal(result.ssl?.expired, true);
   });
 });
 
@@ -142,6 +212,23 @@ describe('requisição fixada ao IP validado', () => {
     assert.equal(result.errorType, 'TIMEOUT');
   });
 
+  it('classifica conexão recusada como offline', async () => {
+    const result = await executeHttpCheck('https://refused.example', 1000, {
+      validateUrl: async () => ({
+        valid: true,
+        resolvedAddresses: [{ address: '93.184.216.34', family: 4 }]
+      }),
+      requestUrl: async () => {
+        const error = new Error('connection refused') as Error & { code?: string };
+        error.code = 'ECONNREFUSED';
+        throw error;
+      }
+    });
+    assert.equal(result.status, 'offline');
+    assert.equal(result.errorType, 'CONNECTION_REFUSED');
+    assert.equal(result.incidentEligible, true);
+  });
+
   it('segue redirects válidos e classifica o destino final como online', async () => {
     let requestCount = 0;
     const result = await executeHttpCheck('https://redirect.example/start', 1000, {
@@ -173,6 +260,13 @@ describe('serviço central de checks', () => {
     };
 
     const fakeSupabase = {
+      async rpc(name: string) {
+        assert.equal(name, 'record_monitoring_result');
+        return {
+          data: [{ check_id: 'check-1', incident_transition: 'unchanged', related_incident_id: null }],
+          error: null
+        };
+      },
       from(table: string) {
         if (table === 'sites') {
           return {
@@ -242,6 +336,85 @@ describe('transições persistidas de incidentes', () => {
   it('resolve incidente após dois sucessos consecutivos', () => {
     assert.equal(determineIncidentTransition(['online', 'online'], true), 'resolved');
   });
+
+  it('não duplica incidente na quarta falha quando já existe incidente ativo', () => {
+    assert.equal(determineIncidentTransition(['offline', 'offline', 'offline', 'offline'], true), 'unchanged');
+  });
+
+  it('401, 403 e 429 interrompem a sequência e não abrem downtime', () => {
+    for (const statusCode of [401, 403, 429]) {
+      const warning = classifyHttpStatus(statusCode, 10, 'https://example.com').status;
+      assert.equal(determineIncidentTransition(['offline', warning, 'offline'], false), 'unchanged');
+    }
+  });
+});
+
+describe('SSL, DNS e alertas controlados', () => {
+  it('mantém online com SSL válido e distante do vencimento', async () => {
+    const result = await executeHttpCheck('https://ssl-valid.example', 1000, {
+      validateUrl: async () => ({ valid: true, resolvedAddresses: [{ address: '93.184.216.34', family: 4 }] }),
+      requestUrl: async () => ({
+        statusCode: 200,
+        observedIp: '93.184.216.34',
+        ssl: { applicable: true, valid: true, hostnameValid: true, daysRemaining: 120, severity: 'normal' }
+      })
+    });
+    assert.equal(result.status, 'online');
+    assert.equal(result.ssl?.valid, true);
+  });
+
+  it('classifica certificado expirado como crítico e elegível para incidente', async () => {
+    const result = await executeHttpCheck('https://ssl-expired.example', 1000, {
+      validateUrl: async () => ({ valid: true, resolvedAddresses: [{ address: '93.184.216.34', family: 4 }] }),
+      requestUrl: async () => ({
+        statusCode: 200,
+        observedIp: '93.184.216.34',
+        ssl: { applicable: true, valid: false, hostnameValid: true, daysRemaining: -1, expired: true, severity: 'critical' }
+      })
+    });
+    assert.equal(result.status, 'critical');
+    assert.equal(result.errorType, 'SSL_EXPIRED');
+    assert.equal(result.incidentEligible, true);
+  });
+
+  it('registra DNS público válido e IP realmente observado', async () => {
+    const result = await executeHttpCheck('https://dns-valid.example', 1000, {
+      validateUrl: async () => ({
+        valid: true,
+        resolvedAddresses: [
+          { address: '93.184.216.34', family: 4 },
+          { address: '2606:2800:220:1:248:1893:25c8:1946', family: 6 }
+        ]
+      }),
+      requestUrl: async () => ({ statusCode: 200, observedIp: '93.184.216.34' }),
+      resolveCname: async () => ['edge.example.net']
+    });
+    assert.deepEqual(result.dns?.a, ['93.184.216.34']);
+    assert.equal(result.dns?.aaaa?.length, 1);
+    assert.deepEqual(result.dns?.cname, ['edge.example.net']);
+    assert.equal(result.observedIp, '93.184.216.34');
+  });
+
+  it('gera evento idempotente quando o IP observado muda', () => {
+    const events = buildEvents(
+      { id: 'site-1', name: 'Site', url: 'https://example.com', domain: 'example.com', is_active: true },
+      {
+        success: true,
+        siteId: 'site-1',
+        url: 'https://example.com',
+        checkedAt: '2026-09-01T12:00:00.000Z',
+        checkId: 'check-2',
+        result: {
+          status: 'online', httpStatus: 200, responseTime: 15, finalUrl: 'https://example.com',
+          resultMessage: 'Online', redirectCount: 0, incidentEligible: false, observedIp: '93.184.216.35'
+        }
+      },
+      '93.184.216.34'
+    );
+    assert.equal(events.length, 1);
+    assert.equal(events[0].type, 'dns_changed');
+    assert.match(events[0].key, /93\.184\.216\.34:93\.184\.216\.35/);
+  });
 });
 
 describe('concorrência do lote', () => {
@@ -277,8 +450,26 @@ describe('agendamento por frequência', () => {
     assert.equal(isSiteDue('15min', '2026-09-01T11:45:00.000Z', now), true);
   });
 
+  it('distingue site vencido de site ainda não vencido pelo last_checked_at', () => {
+    assert.equal(isSiteDue('5min', '2026-09-01T11:54:59.000Z', now), true);
+    assert.equal(isSiteDue('5min', '2026-09-01T11:55:01.000Z', now), false);
+  });
+
   it('não executa frequência desconhecida', () => {
     assert.equal(isSiteDue('invalid', '2026-08-01T00:00:00.000Z', now), false);
+  });
+
+  it('não sobrepõe execução quando o lease distribuído já está ocupado', async () => {
+    const calls: string[] = [];
+    const supabase = {
+      async rpc(name: string) {
+        calls.push(name);
+        return { data: [], error: null };
+      }
+    } as any;
+    const result = await runMonitoringCycle(supabase, 5, now);
+    assert.equal(result.acquired, false);
+    assert.deepEqual(calls, ['claim_monitoring_run']);
   });
 });
 

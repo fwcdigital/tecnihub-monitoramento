@@ -66,7 +66,7 @@ export const SitesView: React.FC<SitesViewProps> = ({
         return true;
       })
       .sort((a, b) => {
-        const priority: Record<SiteStatus, number> = { critical: 1, offline: 2, warning: 3, online: 4, unknown: 5, paused: 6 };
+        const priority: Record<SiteStatus, number> = { critical: 1, offline: 2, warning: 3, security_blocked: 3, online: 4, unknown: 5, paused: 6 };
         return priority[a.status] - priority[b.status];
       });
   }, [sites, statusFilter, hostingFilter, searchQuery]);
@@ -80,7 +80,7 @@ export const SitesView: React.FC<SitesViewProps> = ({
       `"${s.domain}"`,
       `"${s.hosting}"`,
       s.status,
-      s.uptime30d === null ? 'Sem dados' : `${s.uptime30d}%`,
+      s.uptime30d === null ? 'Sem dados' : s.uptime30dReliable ? `${s.uptime30d}%` : `Histórico parcial (${s.uptime30d}%)`,
       s.responseTime === null ? 'Sem dados' : `${s.responseTime}s`,
       s.sslDaysRemaining ?? 'Indisponível',
       s.domainDaysRemaining ?? 'Indisponível'
@@ -219,7 +219,7 @@ export const SitesView: React.FC<SitesViewProps> = ({
                 filteredSites.map((site) => {
                   const isOffline = site.status === 'offline';
                   const isCritical = site.status === 'critical';
-                  const isWarning = site.status === 'warning';
+                  const isWarning = site.status === 'warning' || site.status === 'security_blocked';
                   const isPaused = site.status === 'paused';
 
                   return (
@@ -269,6 +269,11 @@ export const SitesView: React.FC<SitesViewProps> = ({
                             Offline
                           </span>
                         )}
+                        {site.status === 'security_blocked' && (
+                          <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-neutral-400 font-mono">
+                            <span className="w-1.5 h-1.5 rounded-full bg-neutral-500" /> Segurança
+                          </span>
+                        )}
                         {site.status === 'critical' && (
                           <span className="inline-flex items-center gap-1.5 font-semibold text-rose-400">
                             <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
@@ -292,7 +297,7 @@ export const SitesView: React.FC<SitesViewProps> = ({
                       {/* Uptime */}
                       <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
                         <span className={site.uptime30d !== null && site.uptime30d < 99.0 ? 'text-amber-400 font-bold' : 'text-neutral-200'}>
-                          {site.uptime30d === null ? 'Sem dados' : `${site.uptime30d.toFixed(2)}%`}
+                          {site.uptime30d === null ? 'Sem dados' : site.uptime30dReliable ? `${site.uptime30d.toFixed(2)}%` : `Parcial (${site.uptime30d.toFixed(2)}%)`}
                         </span>
                       </td>
 

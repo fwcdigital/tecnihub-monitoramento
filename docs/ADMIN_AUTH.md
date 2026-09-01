@@ -13,9 +13,10 @@ usuário sem esperar o cookie expirar. A data de criação e o último login sã
 pelo próprio Supabase Auth.
 
 O frontend não recebe JWT do Supabase, `service_role`, segredo da sessão ou senha.
-Todas as APIs existentes, inclusive leitura de sites e checks, exigem sessão. Apenas
-`GET /api/health`, `POST /api/auth/login`, `POST /api/auth/logout` e a própria tela
-SPA permanecem acessíveis sem sessão. A área administrativa fica em `/admin`.
+Todas as APIs administrativas, inclusive histórico e alertas, exigem sessão. Permanecem
+públicos somente `GET /api/health`, `GET /api/public/status`, login/logout e a SPA.
+`POST /api/internal/monitor/run` não usa sessão de navegador: exige o segredo exclusivo
+do cron em `Authorization: Bearer`. A área administrativa fica em `/admin`.
 
 O health público retorna somente `status`, nome do serviço e timestamp, sem sites ou
 telemetria. Ele possui limite de 120 consultas por minuto por IP. Headers defensivos
@@ -27,10 +28,12 @@ são aplicados pelo Helmet, incluindo CSP, proteção contra framing e HSTS em p
 - `SUPABASE_SERVICE_ROLE_KEY`: acesso do servidor ao banco e à Admin API do Auth.
 - `SUPABASE_ANON_KEY`: usada no servidor somente para `signInWithPassword`.
 - `ADMIN_SESSION_SECRET`: segredo aleatório de no mínimo 32 bytes.
+- `MONITOR_CRON_SECRET`: segredo diferente, aleatório e exclusivo do Hostinger Cron.
+- `CREDENTIALS_ENCRYPTION_KEY`: chave exclusiva de 32 bytes para AES-256-GCM do cofre.
+- `CREDENTIALS_MASTER_PASSWORD_HASH`: hash gerado por `npm run vault:setup`, nunca a senha em plaintext.
 - `ADMIN_SESSION_TTL_SECONDS`: entre 300 e 86400; padrão 28800 (8 horas).
 - `ALLOWED_ORIGINS`: origens web adicionais confiáveis.
 - `TRUST_PROXY`: `1` apenas atrás de exatamente um proxy reverso confiável.
-- `MONITORING_SCHEDULER_ENABLED`: `true` ou `false`; habilitar somente em uma instância após validar as migrations.
 - `NODE_ENV`: `production` na hospedagem para exigir cookie `Secure`.
 
 Nenhuma dessas variáveis deve usar o prefixo `VITE_`. Para gerar o segredo:
@@ -58,7 +61,9 @@ Auth. Um usuário banido perde acesso na próxima requisição autenticada.
 
 ## Migration 002 — revisão e ordem segura
 
-O SQL continua adequado e não precisa de ajuste:
+O SQL base continua adequado e foi revisado de forma defensiva para também habilitar
+RLS, revogar `anon`/`authenticated` e conceder `service_role` nas tabelas internas das
+migrations 003–005 quando elas já existirem no ambiente:
 
 ```sql
 DROP POLICY IF EXISTS "Permitir select total em sites" ON public.sites;
@@ -88,7 +93,7 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO service_role;
 ```
 
 O Supabase Auth é um serviço separado das tabelas `public`; revogar privilégios de
-`anon` e `authenticated` nessas três tabelas não impede o login. A chave anon é usada
+`anon` e `authenticated` nessas tabelas não impede o login. A chave anon é usada
 somente pelo backend no endpoint do Auth, enquanto toda consulta administrativa ao
 banco usa `service_role`.
 
@@ -101,8 +106,9 @@ Ordem segura:
 5. Aplicar a migration 002 somente após essa validação.
 6. Revalidar login, listagem, criação, edição, check e logout.
 
-Impacto da 002: chaves `anon`/`authenticated` perdem todo acesso direto a `sites`,
-`checks` e `incidents`. Risco principal: indisponibilidade administrativa se ela for
+Impacto da 002: chaves `anon`/`authenticated` perdem todo acesso direto às tabelas
+internas existentes, incluindo `sites`, `checks`, `incidents`, configurações, cofre e
+auditoria. Risco principal: indisponibilidade administrativa se ela for
 aplicada antes de o backend com `service_role` estar funcionando. Rollback emergencial:
 restaurar apenas os grants/policies anteriores do schema versionado; isso reabre a
 superfície insegura e deve ser temporário. A migration não remove dados.

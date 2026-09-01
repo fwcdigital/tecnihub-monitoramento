@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   ArrowLeft, 
   Globe, 
@@ -35,7 +35,8 @@ import {
   BarChart, 
   Bar 
 } from 'recharts';
-import { Site, CheckRecord } from '../types';
+import { Site, CheckRecord, MonitoringSeriesPoint, SiteMetrics } from '../types';
+import { getSiteChecksPage, getSiteMonitoringMetrics } from '../services/siteService';
 
 interface SiteDetailViewProps {
   site: Site;
@@ -55,30 +56,63 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
   isChecking = false
 }) => {
   const [timeRange, setTimeRange] = useState<'24h' | '7d' | '30d' | '90d'>('24h');
+  const [history, setHistory] = useState<CheckRecord[]>(site.checksHistory);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  const [series, setSeries] = useState<MonitoringSeriesPoint[]>([]);
+  const [metrics, setMetrics] = useState<SiteMetrics>(site.metrics || {});
+  const [detailLoading, setDetailLoading] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    getSiteChecksPage(site.id)
+      .then((historyPage) => {
+        if (!active) return;
+        setHistory(historyPage.checks);
+        setNextCursor(historyPage.nextCursor);
+        setHasMoreHistory(historyPage.hasMore);
+      }).catch(() => { if (active) setHistory([]); });
+    return () => { active = false; };
+  }, [site.id, site.updatedAt]);
+
+  useEffect(() => {
+    let active = true;
+    setDetailLoading(true);
+    getSiteMonitoringMetrics(site.id, timeRange).then((monitoring) => {
+      if (!active) return;
+      setSeries(monitoring.series);
+      setMetrics(monitoring.metrics);
+    }).catch(() => setSeries([])).finally(() => { if (active) setDetailLoading(false); });
+    return () => { active = false; };
+  }, [site.id, site.updatedAt, timeRange]);
 
   // The chart is built only from persisted checks returned by the API.
   const latencyData = React.useMemo(() => {
     const days = timeRange === '24h' ? 1 : timeRange === '7d' ? 7 : timeRange === '30d' ? 30 : 90;
-    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-    return site.checksHistory
-      .filter((check) => new Date(check.checkedAt).getTime() >= cutoff && check.responseTime > 0)
-      .slice()
-      .reverse()
-      .map((check) => ({
-        time: new Date(check.checkedAt).toLocaleString('pt-BR', {
-          day: days > 1 ? '2-digit' : undefined,
-          month: days > 1 ? '2-digit' : undefined,
+    return series.filter((point) => point.avg_response_ms !== null).map((point) => ({
+        time: new Date(point.bucket).toLocaleString('pt-BR', {
+          day: days > 1 ? '2-digit' : undefined, month: days > 1 ? '2-digit' : undefined,
           hour: '2-digit',
           minute: '2-digit'
         }),
-        responseTime: check.responseTime
+        responseTime: Number(point.avg_response_ms) / 1000
       }));
-  }, [timeRange, site.checksHistory]);
+  }, [timeRange, series]);
 
   const uptimeBlocks = React.useMemo(
-    () => site.checksHistory.slice(0, 90).reverse(),
-    [site.checksHistory]
+    () => series.filter((point) => Number(point.total_checks) > 0).map((point, index) => ({
+      id: `${point.bucket}-${index}`,
+      timestamp: new Date(point.bucket).toLocaleString('pt-BR'),
+      checkedAt: point.bucket,
+      status: Number(point.available_checks) === Number(point.total_checks) ? 'online' as const
+        : Number(point.available_checks) > 0 ? 'warning' as const : 'offline' as const,
+      httpCode: 'Agregado', responseTime: Number(point.avg_response_ms || 0) / 1000,
+      result: `${point.available_checks}/${point.total_checks} checks disponíveis`
+    })),
+    [series]
   );
+
+  const selectedMetric = metrics[timeRange];
 
   const isPaused = site.status === 'paused';
 
@@ -164,7 +198,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
           <div className={`p-2.5 rounded ${
             site.status === 'online'
               ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-              : site.status === 'warning'
+              : (site.status === 'warning' || site.status === 'security_blocked')
               ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
               : site.status === 'offline' || site.status === 'critical'
               ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
@@ -180,7 +214,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
               <span className={`text-[9px] font-mono font-bold px-1.5 py-0.2 rounded uppercase flex items-center gap-1.5 ${
                 site.status === 'online'
                   ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                  : site.status === 'warning'
+                  : (site.status === 'warning' || site.status === 'security_blocked')
                   ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
                   : site.status === 'offline' || site.status === 'critical'
                   ? 'bg-rose-500 text-white font-bold'
@@ -188,10 +222,10 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
               }`}>
                 <span className={`w-1.5 h-1.5 rounded-full ${
                   site.status === 'online' ? 'bg-emerald-400' :
-                  site.status === 'warning' ? 'bg-amber-400' :
+                  site.status === 'warning' || site.status === 'security_blocked' ? 'bg-amber-400' :
                   site.status === 'offline' || site.status === 'critical' ? 'bg-white animate-pulse' : 'bg-neutral-500'
                 }`} />
-                {site.status === 'online' ? 'ONLINE' : site.status === 'warning' ? 'ATENÇÃO' : site.status === 'critical' ? 'CRÍTICO' : site.status === 'offline' ? 'OFFLINE' : site.status === 'paused' ? 'PAUSADO' : 'SEM DADOS'}
+                {site.status === 'online' ? 'ONLINE' : site.status === 'security_blocked' ? 'BLOQUEADO POR SEGURANÇA' : site.status === 'warning' ? 'ATENÇÃO' : site.status === 'critical' ? 'CRÍTICO' : site.status === 'offline' ? 'OFFLINE' : site.status === 'paused' ? 'PAUSADO' : 'SEM DADOS'}
               </span>
             </div>
             <p className="text-[11px] text-neutral-400 mt-0.5 font-mono">
@@ -202,7 +236,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
 
         {(site.status === 'offline' || site.status === 'critical') && (
           <div className="px-2.5 py-1 rounded bg-rose-500/20 border border-rose-500/30 text-rose-300 text-xs font-mono">
-            {site.checksHistory[0]?.result || (site.status === 'critical' ? `Erro crítico HTTP ${site.httpStatus}` : 'Falha real de conexão')}
+            {history[0]?.result || (site.status === 'critical' ? `Erro crítico HTTP ${site.httpStatus}` : 'Falha real de conexão')}
           </div>
         )}
       </div>
@@ -218,7 +252,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
           <div className="mt-1.5">
             <span className={`text-base font-bold font-mono uppercase ${
               site.status === 'online' ? 'text-emerald-400' :
-              site.status === 'warning' ? 'text-amber-400' :
+              site.status === 'warning' || site.status === 'security_blocked' ? 'text-amber-400' :
               site.status === 'offline' || site.status === 'critical' ? 'text-rose-400' : 'text-neutral-400'
             }`}>
               {site.status}
@@ -233,7 +267,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
           </span>
           <div className="mt-1.5">
             <span className="text-xl font-bold font-mono text-white">
-              {site.uptime30d === null ? 'Sem dados' : `${site.uptime30d.toFixed(2)}%`}
+              {site.uptime30d === null ? 'Sem dados' : site.uptime30dReliable ? `${site.uptime30d.toFixed(2)}%` : `Parcial (${site.uptime30d.toFixed(2)}%)`}
             </span>
           </div>
         </div>
@@ -306,11 +340,11 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
               Histórico de Disponibilidade Operacional
             </h3>
             <p className="text-[10px] text-neutral-500 mt-0.5">
-              Cada bloco representa um check persistido
+              Cada bloco representa um período agregado a partir de checks persistidos ({timeRange})
             </p>
           </div>
           <span className="text-xs font-mono font-bold text-emerald-400">
-            {site.uptime30d === null ? 'Sem dados suficientes' : `${site.uptime30d.toFixed(2)}% de disponibilidade`}
+            {!selectedMetric?.totalChecks ? 'Sem dados suficientes' : `${Number(selectedMetric.uptimePercent).toFixed(2)}% de disponibilidade`}
           </span>
         </div>
 
@@ -337,7 +371,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
         </div>
 
         <div className="flex items-center justify-between text-[9px] font-mono text-neutral-500 pt-0.5">
-          <span>Checks carregados</span>
+          <span>Início do período</span>
           <span className="flex items-center gap-3">
             <span className="flex items-center gap-1">
               <span className="w-1.5 h-1.5 rounded-xs bg-emerald-500" /> Operacional
@@ -386,7 +420,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
         <div className="h-56 w-full pt-1">
           {latencyData.length === 0 ? (
             <div className="h-full flex items-center justify-center text-xs font-mono text-neutral-500">
-              Sem dados suficientes no período selecionado.
+              {detailLoading ? 'Carregando medições reais...' : 'Sem dados suficientes no período selecionado.'}
             </div>
           ) : (
           <ResponsiveContainer width="100%" height="100%">
@@ -423,6 +457,15 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
           </ResponsiveContainer>
           )}
         </div>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-[#181818]">
+          {[
+            { label: 'Atual', value: site.responseTime === null ? null : site.responseTime * 1000 },
+            { label: `Média ${timeRange}`, value: selectedMetric?.avgResponseMs },
+            { label: 'Mínimo', value: selectedMetric?.minResponseMs },
+            { label: 'Máximo', value: selectedMetric?.maxResponseMs }
+          ].map((metric) => <div key={metric.label} className="p-2 rounded bg-black border border-[#1e1e1e]"><span className="text-[9px] font-mono text-neutral-500 uppercase">{metric.label}</span><strong className="text-xs font-mono text-neutral-200 block mt-0.5">{metric.value === null || metric.value === undefined ? 'Sem dados' : `${Math.round(Number(metric.value))} ms`}</strong></div>)}
+        </div>
+        {selectedMetric?.totalChecks ? <p className="text-[9px] font-mono text-neutral-600">{selectedMetric.hasFullWindow ? 'Janela histórica completa.' : 'Histórico parcial; a janela selecionada ainda não está totalmente coberta.'} {selectedMetric.totalChecks} checks elegíveis.</p> : null}
       </div>
 
       {/* Rastreamento — Tags e Ferramentas Monitoradas */}
@@ -436,7 +479,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
               </h3>
             </div>
             <p className="text-[10px] text-neutral-400 mt-0.5 font-mono">
-              Última verificação de rastreamento: <strong className="text-neutral-200">Não foi possível verificar</strong>
+              Última análise HTML: <strong className="text-neutral-200">{site.tracking?.lastCheckedAt ? new Date(site.tracking.lastCheckedAt).toLocaleString('pt-BR') : 'Sem dados'}</strong>. Detecção não confirma funcionamento da tag.
             </p>
           </div>
 
@@ -569,11 +612,11 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
             </div>
             <div className="p-2 rounded bg-[#000000] border border-[#1e1e1e] flex items-center justify-between">
               <span className="text-neutral-400">Certificado SSL:</span>
-              <span className="text-neutral-500 font-mono font-medium">Indisponível</span>
+              <span className="text-neutral-300 font-mono font-medium">{site.ssl?.applicable === false ? 'Não aplicável (HTTP)' : site.sslValid === null ? 'Informação indisponível' : site.sslValid ? `Válido (${site.sslDaysRemaining}d)` : 'Inválido'}</span>
             </div>
             <div className="p-2 rounded bg-[#000000] border border-[#1e1e1e] flex items-center justify-between">
-              <span className="text-neutral-400">Domínio WHOIS:</span>
-              <span className="text-neutral-500 font-mono font-medium">Indisponível</span>
+              <span className="text-neutral-400">Domínio RDAP:</span>
+              <span className="text-neutral-300 font-mono font-medium">{site.domainInfo?.status === 'available' ? `${site.domainDaysRemaining ?? '—'}d` : 'Informação indisponível'}</span>
             </div>
           </div>
         </div>
@@ -585,12 +628,12 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
           {site.monitorContent && site.expectedContentText ? (
             <div className="space-y-1.5">
               <p className="text-[11px] text-neutral-400">
-                Expressão configurada (o coletor atual ainda não verifica o HTML):
+                Texto procurado no HTML real da última resposta:
               </p>
               <div className="p-2 rounded bg-[#000000] border border-[#1e1e1e] font-mono text-xs text-neutral-300 flex items-center justify-between">
                 <span>"{site.expectedContentText}"</span>
-                <span className="text-[9px] px-1.5 py-0.2 rounded bg-[#161616] text-neutral-400">
-                  Não verificado
+                <span className={`text-[9px] px-1.5 py-0.2 rounded bg-[#161616] ${history[0]?.expectedContentFound === true ? 'text-emerald-400' : history[0]?.expectedContentFound === false ? 'text-rose-400' : 'text-neutral-400'}`}>
+                  {history[0]?.expectedContentFound === true ? 'Encontrado' : history[0]?.expectedContentFound === false ? 'Não encontrado' : 'Sem resultado'}
                 </span>
               </div>
             </div>
@@ -599,6 +642,30 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
               Verificação de conteúdo desativada para este site.
             </p>
           )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+        <div className="p-3 rounded bg-[#0a0a0a] border border-[#1e1e1e] text-[10px] font-mono space-y-1">
+          <strong className="text-neutral-300 uppercase">DNS / IP real</strong>
+          <p className="text-neutral-500">IP observado: <span className="text-neutral-300">{site.dns?.observedIp || history[0]?.observedIp || 'Informação indisponível'}</span></p>
+          <p className="text-neutral-500">A: <span className="text-neutral-300">{site.dns?.a?.join(', ') || 'Informação indisponível'}</span></p>
+          <p className="text-neutral-500">AAAA: <span className="text-neutral-300">{site.dns?.aaaa?.join(', ') || 'Informação indisponível'}</span></p>
+          <p className="text-neutral-500">CNAME: <span className="text-neutral-300">{site.dns?.cname?.join(', ') || 'Informação indisponível'}</span></p>
+        </div>
+        <div className="p-3 rounded bg-[#0a0a0a] border border-[#1e1e1e] text-[10px] font-mono space-y-1">
+          <strong className="text-neutral-300 uppercase">Certificado TLS</strong>
+          <p className="text-neutral-500">Hostname: <span className="text-neutral-300">{site.ssl?.hostnameValid === true ? 'Válido' : site.ssl?.hostnameValid === false ? 'Inválido' : 'Não aplicável/indisponível'}</span></p>
+          <p className="text-neutral-500">Emissor: <span className="text-neutral-300">{site.ssl?.issuer || 'Informação indisponível'}</span></p>
+          <p className="text-neutral-500">Válido de: <span className="text-neutral-300">{site.ssl?.validFrom ? new Date(site.ssl.validFrom).toLocaleDateString('pt-BR') : 'Informação indisponível'}</span></p>
+          <p className="text-neutral-500">Válido até: <span className="text-neutral-300">{site.ssl?.validTo ? new Date(site.ssl.validTo).toLocaleDateString('pt-BR') : 'Informação indisponível'}</span></p>
+        </div>
+        <div className="p-3 rounded bg-[#0a0a0a] border border-[#1e1e1e] text-[10px] font-mono space-y-1">
+          <strong className="text-neutral-300 uppercase">Domínio / WordPress</strong>
+          <p className="text-neutral-500">Registrador: <span className="text-neutral-300">{site.domainInfo?.registrar || 'Informação indisponível'}</span></p>
+          <p className="text-neutral-500">Expiração: <span className="text-neutral-300">{site.domainInfo?.expiresAt || site.domainInfo?.expires_at_registry ? new Date(site.domainInfo.expiresAt || site.domainInfo.expires_at_registry).toLocaleDateString('pt-BR') : 'Informação indisponível'}</span></p>
+          <p className="text-neutral-500">WordPress: <span className="text-neutral-300">{site.wordpress?.detected ? 'Detectado' : site.isWordPress ? 'Configurado; sem evidência' : 'Não detectado'}</span></p>
+          <p className="text-neutral-500">Admin básico: <span className="text-neutral-300">{site.wordpress?.administrativeAvailable === true ? 'Acessível/protegido' : site.wordpress?.administrativeAvailable === false ? 'Indisponível' : 'Não aplicável'}</span></p>
         </div>
       </div>
 
@@ -622,17 +689,18 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
                 <th className="py-2.5 px-3 font-semibold">HTTP</th>
                 <th className="py-2.5 px-3 font-semibold">Resposta</th>
                 <th className="py-2.5 px-3 font-semibold">Resultado</th>
+                <th className="py-2.5 px-3 font-semibold">Incidente</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#181818] font-mono text-[11px]">
-              {site.checksHistory.length === 0 ? (
+              {history.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="py-6 text-center text-neutral-500 font-sans">
+                  <td colSpan={6} className="py-6 text-center text-neutral-500 font-sans">
                     Nenhum registro de verificação recente para este site.
                   </td>
                 </tr>
               ) : (
-                site.checksHistory.map((check) => {
+                history.map((check) => {
                   const isOff = check.status === 'offline';
                   const isCritical = check.status === 'critical';
                   const isWarn = check.status === 'warning';
@@ -668,6 +736,12 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
                             Crítico
                           </span>
                         )}
+                        {check.status === 'security_blocked' && (
+                          <span className="text-neutral-400 font-bold flex items-center gap-1.5">
+                            <span className="w-1.5 h-1.5 rounded-full bg-neutral-500" />
+                            Bloqueado por segurança
+                          </span>
+                        )}
                       </td>
                       <td className="py-2.5 px-3 text-neutral-200 font-bold">{check.httpCode}</td>
                       <td className="py-2.5 px-3 text-neutral-300">
@@ -676,6 +750,9 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
                       <td className="py-2.5 px-3 font-sans text-neutral-300">
                         {check.result}
                       </td>
+                      <td className="py-2.5 px-3 text-neutral-400">
+                        {check.incidentId ? <span className="text-[9px] px-1.5 py-0.5 rounded bg-rose-950/30 border border-rose-900/50 text-rose-300">Relacionado</span> : '—'}
+                      </td>
                     </tr>
                   );
                 })
@@ -683,6 +760,19 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
             </tbody>
           </table>
         </div>
+        {hasMoreHistory && (
+          <button
+            onClick={async () => {
+              const page = await getSiteChecksPage(site.id, 50, nextCursor);
+              setHistory((current) => [...current, ...page.checks]);
+              setNextCursor(page.nextCursor);
+              setHasMoreHistory(page.hasMore);
+            }}
+            className="px-3 py-1.5 rounded bg-[#111] border border-[#252525] text-[10px] font-mono text-neutral-300"
+          >
+            Carregar mais verificações
+          </button>
+        )}
       </div>
     </div>
   );

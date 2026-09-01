@@ -60,10 +60,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   // Metrics computation
   const totalSites = sites.length;
   const onlineSites = sites.filter(s => s.status === 'online').length;
-  const warningSites = sites.filter(s => s.status === 'warning').length;
+  const warningSites = sites.filter(s => s.status === 'warning' || s.status === 'security_blocked').length;
   const offlineSites = sites.filter(s => s.status === 'offline' || s.status === 'critical').length;
   const pausedSites = sites.filter(s => s.status === 'paused').length;
-  const uptimeValues = sites.map((site) => site.uptime30d).filter((value): value is number => value !== null);
+  const uptimeValues = sites.filter((site) => site.uptime30dReliable).map((site) => site.uptime30d).filter((value): value is number => value !== null);
   const avgUptime = uptimeValues.length
     ? (uptimeValues.reduce((sum, value) => sum + value, 0) / uptimeValues.length).toFixed(2)
     : null;
@@ -75,7 +75,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
   // Critical offline site detection
   const offlineSite = sites.find(s => s.status === 'offline' || s.status === 'critical');
-  const activeWarningSites = sites.filter(s => s.status === 'warning');
+  const activeWarningSites = sites.filter(s => s.status === 'warning' || s.status === 'security_blocked');
   const latestGlobalCheck = sites
     .flatMap((site) => site.checksHistory)
     .sort((a, b) => new Date(b.checkedAt).getTime() - new Date(a.checkedAt).getTime())[0];
@@ -89,6 +89,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         if (
           statusFilter !== 'all' &&
           !(statusFilter === 'offline' && (s.status === 'offline' || s.status === 'critical')) &&
+          !(statusFilter === 'warning' && s.status === 'security_blocked') &&
           s.status !== statusFilter
         ) return false;
         // Search query
@@ -109,6 +110,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           offline: 2,
           warning: 3,
           online: 4,
+          security_blocked: 4,
           unknown: 5,
           paused: 6
         };
@@ -444,7 +446,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     filteredAndSortedSites.map((site) => {
                       const isOffline = site.status === 'offline';
                       const isCritical = site.status === 'critical';
-                      const isWarning = site.status === 'warning';
+                      const isWarning = site.status === 'warning' || site.status === 'security_blocked';
                       const isPaused = site.status === 'paused';
 
                       return (
@@ -492,6 +494,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                                 Offline
                               </span>
                             )}
+                            {site.status === 'security_blocked' && (
+                              <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-neutral-400 font-mono">
+                                <span className="w-1.5 h-1.5 rounded-full bg-neutral-500" /> Segurança
+                              </span>
+                            )}
                             {site.status === 'critical' && (
                               <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-rose-400 font-mono">
                                 <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
@@ -515,7 +522,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           {/* Uptime */}
                           <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
                             <span className={site.uptime30d !== null && site.uptime30d < 99.0 ? 'text-amber-400 font-bold' : 'text-neutral-200'}>
-                              {site.uptime30d === null ? 'Sem dados' : `${site.uptime30d.toFixed(2)}%`}
+                              {site.uptime30d === null ? 'Sem dados' : site.uptime30dReliable ? `${site.uptime30d.toFixed(2)}%` : `Parcial (${site.uptime30d.toFixed(2)}%)`}
                             </span>
                           </td>
 

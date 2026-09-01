@@ -25,8 +25,9 @@ export const SettingsView: React.FC = () => {
           <div className="flex items-center gap-1.5"><Server className="w-4 h-4 text-neutral-400" /><h2 className="text-xs font-bold text-white uppercase font-mono">Motor HTTP</h2></div>
           <ul className="space-y-1.5 text-[11px] text-neutral-400">
             <li>Disponibilidade, status HTTP, redirects e tempo de resposta: ativos.</li>
-            <li>SSL, vencimento de domínio, conteúdo e tracking: indisponíveis no coletor atual.</li>
-            <li>Intervalo por site: executado pelo agendador quando habilitado no servidor.</li>
+            <li>HTTP, SSL/TLS, DNS/IP, conteúdo, tags e WordPress: diagnósticos reais persistidos.</li>
+            <li>Domínio: RDAP real com cache; informação ausente é exibida como indisponível.</li>
+            <li>Intervalo por site: executado pelo Hostinger Cron via endpoint interno protegido.</li>
           </ul>
         </div>
 

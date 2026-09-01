@@ -29,4 +29,25 @@ GRANT ALL ON TABLE public.checks TO service_role;
 GRANT ALL ON TABLE public.incidents TO service_role;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO service_role;
 
+-- Revisão defensiva: contempla também as tabelas internas adicionadas pelas
+-- migrations seguintes quando elas já existirem no ambiente. Cada migration
+-- nova continua responsável por habilitar RLS e revogar acesso ao criar a tabela.
+DO $$
+DECLARE
+  internal_table TEXT;
+BEGIN
+  FOREACH internal_table IN ARRAY ARRAY[
+    'monitoring_scheduler_locks', 'monitoring_runs', 'domain_rdap_cache',
+    'alert_webhooks', 'alert_deliveries', 'technical_credentials',
+    'credential_audit_log'
+  ] LOOP
+    IF to_regclass('public.' || internal_table) IS NOT NULL THEN
+      EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', internal_table);
+      EXECUTE format('REVOKE ALL ON TABLE public.%I FROM anon, authenticated', internal_table);
+      EXECUTE format('GRANT ALL ON TABLE public.%I TO service_role', internal_table);
+    END IF;
+  END LOOP;
+END;
+$$;
+
 COMMIT;

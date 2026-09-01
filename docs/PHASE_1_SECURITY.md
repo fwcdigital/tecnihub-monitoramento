@@ -11,6 +11,8 @@ As migrations em `supabase/migrations/` são propostas e **não são aplicadas a
 O login usa Supabase Auth e exige `app_metadata.role = "admin"`. Depois da autenticação, o backend emite uma sessão assinada em cookie `HttpOnly`. Todos os endpoints operacionais abaixo exigem essa sessão:
 
 - `GET /api/sites`
+- `GET /api/sites/:siteId/checks`
+- `GET /api/sites/:siteId/metrics`
 - `POST /api/sites`
 - `PATCH /api/sites/:siteId`
 - `PATCH /api/sites/:siteId/active`
@@ -19,24 +21,30 @@ O login usa Supabase Auth e exige `app_metadata.role = "admin"`. Depois da auten
 - `PATCH /api/incidents/:incidentId/resolve`
 - `POST /api/check-site`
 - `POST /api/check-all`
+- `GET /api/alerts/config`
+- `PUT /api/alerts/webhook`
 
-Somente `GET /api/health`, `POST /api/auth/login`, `POST /api/auth/logout` e os arquivos da SPA são públicos. CORS e a validação de origem complementam a sessão e protegem as escritas feitas pelo navegador.
+`GET /api/public/status` é público e sanitizado. `POST /api/internal/monitor/run` é exclusivo do cron e protegido por segredo backend. Login/logout, health e arquivos da SPA também são públicos. CORS e a validação de origem complementam a sessão e protegem as escritas feitas pelo navegador.
 
 ## Exclusão definitiva e histórico
 
-O schema atual usa `ON DELETE CASCADE` de `sites` para `checks` e `incidents`. Para evitar perda silenciosa:
+A migration 003 prepara `ON DELETE RESTRICT` de `sites` para `checks` e `incidents`.
+Até sua aplicação controlada, a API continua sendo a barreira obrigatória contra perda
+silenciosa:
 
 1. desativar o monitoramento é a ação padrão e preserva tudo;
 2. a exclusão exige digitar exatamente o domínio ou nome do site;
 3. a API bloqueia a exclusão com HTTP 409 se existir qualquer check ou incidente;
 4. sites sem histórico podem ser excluídos definitivamente.
 
-Permitir a remoção do cadastro preservando o histórico exigirá uma migration posterior para snapshots e chaves estrangeiras anuláveis, ou autorização explícita para apagar o histórico em cascade.
+Permitir a remoção do cadastro preservando o histórico exigirá uma migration posterior
+para snapshots e chaves estrangeiras anuláveis. Apagar histórico em cascade não faz
+parte do MVP.
 
 ## Incidentes
 
-Incidentes exibidos no frontend vêm exclusivamente da tabela `public.incidents` pela API autenticada. Checks individuais, em lote e agendados usam o mesmo serviço central. Um incidente é aberto após três checks consecutivos `critical`/`offline` e resolvido automaticamente após dois checks consecutivos `online`. A resolução manual também é persistida pela API administrativa.
+Incidentes exibidos no frontend vêm exclusivamente da tabela `public.incidents` pela API autenticada. Checks individuais, em lote e via cron usam o mesmo serviço central e a mesma RPC atômica. Um incidente de downtime é aberto após três falhas de disponibilidade consecutivas e resolvido automaticamente após dois checks `online`. Warning, inclusive 401/403/429, e `security_blocked` interrompem a sequência e não abrem downtime.
 
 ## Dados operacionais visíveis
 
-Uptime de 30 dias usa contagens reais da tabela `checks`; tempo de resposta, histórico e gráficos usam checks persistidos. SSL, vencimento de domínio, conteúdo e tracking são mostrados como indisponíveis ou não verificados porque ainda não possuem coletores reais. Relatórios derivam apenas de sites, checks e incidentes carregados. Não existem fallbacks de demonstração ou dados operacionais em `localStorage`.
+Uptime de 24h/7d/30d/90d, latência, histórico, gráficos e relatórios usam checks persistidos e agregações do banco. SSL/TLS, DNS/IP, conteúdo, evidências de tags e WordPress são coletados no motor; domínio usa RDAP com cache. Ausência de dados é exibida como indisponível ou histórico parcial. Não existem fallbacks operacionais de demonstração nem dados em `localStorage`.

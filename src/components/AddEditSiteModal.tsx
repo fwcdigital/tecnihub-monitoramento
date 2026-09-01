@@ -28,8 +28,8 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
   // Toggles
   const [monitorAvailability, setMonitorAvailability] = useState(true);
   const [monitorResponseTime, setMonitorResponseTime] = useState(true);
-  const [monitorSsl, setMonitorSsl] = useState(false);
-  const [monitorDomain, setMonitorDomain] = useState(false);
+  const [monitorSsl, setMonitorSsl] = useState(true);
+  const [monitorDomain, setMonitorDomain] = useState(true);
   const [monitorRedirects, setMonitorRedirects] = useState(true);
   const [monitorContent, setMonitorContent] = useState(false);
   const [expectedContentText, setExpectedContentText] = useState('');
@@ -102,8 +102,8 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
       setFrequency('5min');
       setMonitorAvailability(true);
       setMonitorResponseTime(true);
-      setMonitorSsl(false);
-      setMonitorDomain(false);
+      setMonitorSsl(true);
+      setMonitorDomain(true);
       setMonitorRedirects(true);
       setMonitorContent(false);
       setExpectedContentText('');
@@ -159,11 +159,11 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
 
     // Build tracking config
     const trackingConfig: SiteTrackingConfig = {
-      ga4: { enabled: ga4Enabled, expectedId: ga4ExpectedId.trim() },
-      gtm: { enabled: gtmEnabled, expectedId: gtmExpectedId.trim() },
-      googleAds: { enabled: googleAdsEnabled, expectedId: googleAdsExpectedId.trim() },
-      metaPixel: { enabled: metaPixelEnabled, expectedId: metaPixelExpectedId.trim() },
-      rdStation: { enabled: rdStationEnabled, expectedId: rdStationExpectedId.trim() },
+      ga4: { enabled: ga4Enabled, expectedId: ga4Enabled ? ga4ExpectedId.trim() : '' },
+      gtm: { enabled: gtmEnabled, expectedId: gtmEnabled ? gtmExpectedId.trim() : '' },
+      googleAds: { enabled: googleAdsEnabled, expectedId: googleAdsEnabled ? googleAdsExpectedId.trim() : '' },
+      metaPixel: { enabled: metaPixelEnabled, expectedId: metaPixelEnabled ? metaPixelExpectedId.trim() : '' },
+      rdStation: { enabled: rdStationEnabled, expectedId: rdStationEnabled ? rdStationExpectedId.trim() : '' },
       searchConsole: { enabled: searchConsoleEnabled, searchConsoleConfigured },
       lastCheckedAt: undefined,
       lastCheckTimestamp: undefined,
@@ -403,7 +403,7 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
                 />
                 <div>
                   <span className="text-xs font-medium text-neutral-200 block">Monitorar certificado SSL</span>
-                  <span className="text-[10px] text-neutral-500">Indisponível no coletor atual</span>
+                  <span className="text-[10px] text-neutral-500">TLS real para URLs HTTPS; HTTP é não aplicável</span>
                 </div>
               </label>
 
@@ -416,7 +416,7 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
                 />
                 <div>
                   <span className="text-xs font-medium text-neutral-200 block">Monitorar domínio (WHOIS)</span>
-                  <span className="text-[10px] text-neutral-500">Indisponível no coletor atual</span>
+                  <span className="text-[10px] text-neutral-500">Consulta RDAP real com cache</span>
                 </div>
               </label>
 
@@ -437,12 +437,12 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
                 <input
                   type="checkbox"
                   checked={monitorContent}
-                  disabled
+                  onChange={(event) => setMonitorContent(event.target.checked)}
                   className="mt-0.5 rounded bg-[#111111] border-[#333333] text-white focus:ring-0"
                 />
                 <div>
                   <span className="text-xs font-medium text-neutral-200 block">Verificação de conteúdo</span>
-                  <span className="text-[10px] text-neutral-500">Indisponível; configuração existente é preservada</span>
+                  <span className="text-[10px] text-neutral-500">Busca literal no HTML real de cada check</span>
                 </div>
               </label>
             </div>
@@ -457,7 +457,7 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
               </div>
               <p className="text-[10px] text-neutral-400 leading-relaxed">
                 Informe um termo ou trecho de texto que deve obrigatoriamente existir na resposta. 
-                O valor é preservado no cadastro, mas o coletor atual ainda não verifica o HTML.
+                O check procura este texto no HTML real; ausência com resposta HTTP válida gera warning operacional.
               </p>
               <input
                 type="text"

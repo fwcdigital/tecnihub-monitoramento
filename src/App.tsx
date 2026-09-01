@@ -32,8 +32,10 @@ import { IncidentDetailModal } from './components/IncidentDetailModal';
 import { ConfirmDeleteModal } from './components/ConfirmDeleteModal';
 import { ToastContainer, ToastMessage } from './components/Toast';
 import { LoginView } from './components/LoginView';
+import { PublicStatusPage } from './components/PublicStatusPage';
+import { AccessesView } from './components/AccessesView';
 
-export default function App() {
+function AdminApp() {
   const [authStatus, setAuthStatus] = useState<'checking' | 'authenticated' | 'unauthenticated'>('checking');
   const [adminUser, setAdminUser] = useState<AdminUser | null>(null);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
@@ -66,7 +68,7 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   const addToast = useCallback((type: ToastMessage['type'], title: string, message?: string) => {
-    const id = `toast-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`;
+    const id = `toast-${crypto.randomUUID()}`;
     setToasts((prev) => [...prev, { id, type, title, message }]);
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -85,10 +87,6 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!window.location.pathname.startsWith('/admin')) {
-      window.history.replaceState(null, '', '/admin');
-    }
-
     let active = true;
     getAdminSession()
       .then((user) => {
@@ -176,7 +174,7 @@ export default function App() {
 
   // Counters
   const offlineCount = sites.filter((s) => s.status === 'offline' || s.status === 'critical').length;
-  const warningCount = sites.filter((s) => s.status === 'warning').length;
+  const warningCount = sites.filter((s) => s.status === 'warning' || s.status === 'security_blocked').length;
   const onlineCount = sites.filter((s) => s.status === 'online').length;
   const pausedCount = sites.filter((s) => s.status === 'paused').length;
   const unknownCount = sites.filter((s) => s.status === 'unknown').length;
@@ -207,9 +205,11 @@ export default function App() {
       if (siteToEdit) {
         // Edit existing site through the backend (never directly through anon RLS).
         await updateSiteInDatabase(siteToEdit.id, siteData);
-        setSites((prev) =>
-          prev.map((s) => (s.id === siteToEdit.id ? { ...s, ...siteData } : s))
-        );
+        try {
+          await reloadOperationalData();
+        } catch {
+          setSites((prev) => prev.map((s) => (s.id === siteToEdit.id ? { ...s, ...siteData } : s)));
+        }
         addToast('success', 'Site atualizado', `As configurações de ${siteData.siteName || siteToEdit.siteName} foram salvas.`);
       } else {
         // Add new site
@@ -317,6 +317,8 @@ export default function App() {
           'Alerta na verificação',
           `${targetSite.domain} retornou HTTP ${result.httpStatus}. ${result.errorMessage || ''}`
         );
+      } else if (result.status === 'security_blocked') {
+        addToast('warning', 'Verificação bloqueada por segurança', `${targetSite.domain}: ${result.resultMessage}`);
       } else if (result.status === 'critical') {
         addToast(
           'error',
@@ -548,6 +550,10 @@ export default function App() {
             />
           )}
 
+          {currentTab === 'accesses' && (
+            <AccessesView sites={sites} notify={addToast} />
+          )}
+
           {currentTab === 'alerts' && (
             <AlertsView />
           )}
@@ -598,4 +604,8 @@ export default function App() {
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
+}
+
+export default function App() {
+  return window.location.pathname.startsWith('/admin') ? <AdminApp /> : <PublicStatusPage />;
 }

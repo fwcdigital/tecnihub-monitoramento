@@ -13,7 +13,9 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test": "tsx --test server/**/*.test.ts",
-    "admin:create": "tsx scripts/create-admin.ts"
+    "admin:create": "tsx scripts/create-admin.ts",
+    "vault:setup": "tsx scripts/create-vault-master-password.ts",
+    "validate:real": "tsx scripts/validate-real-readonly.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

@@ -2,6 +2,7 @@ import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import helmet from 'helmet';
+import { timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SupabaseClient } from '@supabase/supabase-js';
@@ -19,7 +20,27 @@ import { mapWithConcurrency } from './services/concurrency';
 import { LoginRateLimiter } from './services/loginRateLimiter';
 import { normalizeHttpUrl, validateUrlForSSRF } from './services/ssrfProtection';
 import { processSiteCheck, SiteCheckError, SiteRecordForCheck } from './services/siteCheckService';
-import { isSupportedCheckInterval, startMonitoringScheduler } from './services/monitoringScheduler';
+import { isSupportedCheckInterval, runMonitoringCycle } from './services/monitoringScheduler';
+import { processPendingWebhookDeliveries } from './services/webhookAlertService';
+import {
+  CredentialMetadata,
+  CredentialRepository,
+  CredentialType,
+  sanitizeCredential,
+  SupabaseCredentialRepository
+} from './services/credentialRepository';
+import {
+  clearVaultSessionCookie,
+  createVaultSessionCookie,
+  decryptCredentialSecret,
+  DEFAULT_VAULT_SESSION_TTL_SECONDS,
+  encryptCredentialSecret,
+  validateCredentialsEncryptionKey,
+  validateMasterPasswordHashFormat,
+  verifyMasterPassword,
+  verifyVaultSessionCookie,
+  VaultSessionCookieOptions
+} from './services/credentialsVault';
 
 dotenv.config();
 
@@ -47,7 +68,14 @@ export interface CreateAppOptions {
   trustProxy?: boolean;
   secureCookie?: boolean;
   sessionSecret?: string;
+  monitorCronSecret?: string;
   sessionTtlSeconds?: number;
+  credentialsEncryptionKey?: string;
+  masterPasswordHash?: string;
+  vaultSessionTtlSeconds?: number;
+  vaultAuthorizationRateLimiter?: LoginRateLimiter;
+  vaultRevealRateLimiter?: LoginRateLimiter;
+  getCredentialRepository?: () => CredentialRepository | null;
 }
 
 function getAllowedOrigins(isProduction: boolean): string[] {
@@ -85,11 +113,35 @@ function sendDatabaseUnavailable(res: Response, isProduction: boolean) {
   });
 }
 
+function publicStatusForSite(site: any, latestCheck: any): 'online' | 'warning' | 'critical' | 'offline' | 'unknown' {
+  if (!latestCheck) return 'unknown';
+  if (site.monitoring_state === 'down') {
+    return latestCheck.status === 'offline' ? 'offline' : 'critical';
+  }
+  if (['suspected_failure', 'recovering', 'security_blocked'].includes(site.monitoring_state)) return 'warning';
+  if (latestCheck.status === 'security_blocked') return 'warning';
+  return ['online', 'warning', 'critical', 'offline'].includes(latestCheck.status)
+    ? latestCheck.status
+    : 'unknown';
+}
+
 export function assertSecureProductionConfiguration(env: NodeJS.ProcessEnv = process.env): void {
   if (env.NODE_ENV !== 'production') return;
 
   if (!validateSessionSecret(env.ADMIN_SESSION_SECRET || '')) {
     throw new Error('ADMIN_SESSION_SECRET é obrigatório em produção e deve possuir ao menos 32 bytes aleatórios.');
+  }
+
+  if (!validateSessionSecret(env.MONITOR_CRON_SECRET || '')) {
+    throw new Error('MONITOR_CRON_SECRET é obrigatório em produção e deve possuir ao menos 32 bytes aleatórios.');
+  }
+
+  if (!validateCredentialsEncryptionKey(env.CREDENTIALS_ENCRYPTION_KEY || '')) {
+    throw new Error('CREDENTIALS_ENCRYPTION_KEY é obrigatória em produção e deve representar exatamente 32 bytes.');
+  }
+
+  if (!validateMasterPasswordHashFormat(env.CREDENTIALS_MASTER_PASSWORD_HASH || '')) {
+    throw new Error('CREDENTIALS_MASTER_PASSWORD_HASH é obrigatório em produção e deve ser gerado pelo script administrativo.');
   }
 
   const origins = (env.ALLOWED_ORIGINS || '').split(',').map((value) => value.trim()).filter(Boolean);
@@ -110,9 +162,13 @@ export function assertSecureProductionConfiguration(env: NodeJS.ProcessEnv = pro
     throw new Error('TRUST_PROXY deve ser 0 ou 1. Use 1 somente atrás de exatamente um proxy confiável.');
   }
 
-  if (env.MONITORING_SCHEDULER_ENABLED && !['true', 'false'].includes(env.MONITORING_SCHEDULER_ENABLED)) {
-    throw new Error('MONITORING_SCHEDULER_ENABLED deve ser true ou false.');
-  }
+}
+
+function secretsMatch(provided: string, expected: string): boolean {
+  if (!provided || !validateSessionSecret(expected)) return false;
+  const providedBuffer = Buffer.from(provided, 'utf8');
+  const expectedBuffer = Buffer.from(expected, 'utf8');
+  return providedBuffer.length === expectedBuffer.length && timingSafeEqual(providedBuffer, expectedBuffer);
 }
 
 async function validateAdministrativeUrl(url: string): Promise<string> {
@@ -138,6 +194,9 @@ function buildSitePayload(body: Record<string, any>) {
     is_wordpress: Boolean(body.is_wordpress),
     is_active: body.is_active !== false,
     check_interval: String(body.check_interval || '5min').trim(),
+    monitor_response_time: body.monitor_response_time !== false,
+    monitor_ssl: body.monitor_ssl !== false,
+    monitor_domain: body.monitor_domain !== false,
     expected_content: body.expected_content ? String(body.expected_content).trim() : null,
     expected_ga4_id: body.expected_ga4_id ? String(body.expected_ga4_id).trim() : null,
     expected_gtm_id: body.expected_gtm_id ? String(body.expected_gtm_id).trim() : null,
@@ -146,6 +205,59 @@ function buildSitePayload(body: Record<string, any>) {
     uses_search_console: Boolean(body.uses_search_console),
     uses_rd_station: Boolean(body.uses_rd_station)
   };
+}
+
+const CREDENTIAL_TYPES = new Set<CredentialType>(['WORDPRESS', 'HOSPEDAGEM', 'FTP', 'SFTP', 'OUTROS']);
+
+function nullableString(value: unknown, maxLength: number): string | null {
+  if (value === null || value === undefined) return null;
+  const normalized = String(value).trim();
+  if (!normalized) return null;
+  if (normalized.length > maxLength) throw new SiteCheckError('Campo de acesso técnico excede o tamanho permitido.', 400, 'INVALID_CREDENTIAL_PAYLOAD');
+  return normalized;
+}
+
+function normalizeCredentialUrl(value: unknown): string | null {
+  const normalized = nullableString(value, 2048);
+  if (!normalized) return null;
+  try {
+    const parsed = new URL(normalized);
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('protocol');
+    return parsed.toString();
+  } catch {
+    throw new SiteCheckError('A URL do acesso deve ser HTTP ou HTTPS válida.', 400, 'INVALID_CREDENTIAL_URL');
+  }
+}
+
+function buildCredentialMetadata(body: Record<string, unknown>): CredentialMetadata {
+  const type = String(body.type || '').trim().toUpperCase() as CredentialType;
+  if (!CREDENTIAL_TYPES.has(type)) {
+    throw new SiteCheckError('Tipo de acesso técnico inválido.', 400, 'INVALID_CREDENTIAL_TYPE');
+  }
+  const portValue = body.port === null || body.port === undefined || body.port === '' ? null : Number(body.port);
+  if (portValue !== null && (!Number.isInteger(portValue) || portValue < 1 || portValue > 65_535)) {
+    throw new SiteCheckError('A porta deve ser um inteiro entre 1 e 65535.', 400, 'INVALID_CREDENTIAL_PORT');
+  }
+  const metadata: CredentialMetadata = {
+    type,
+    service_name: nullableString(body.serviceName, 160),
+    provider: nullableString(body.provider, 160),
+    url: normalizeCredentialUrl(body.url),
+    username: nullableString(body.username, 320),
+    protocol: type === 'FTP' || type === 'SFTP' ? type : null,
+    host: nullableString(body.host, 255),
+    port: portValue,
+    notes: nullableString(body.notes, 2000)
+  };
+  const invalid =
+    (type === 'WORDPRESS' && (!metadata.url || !metadata.username)) ||
+    (type === 'HOSPEDAGEM' && (!metadata.provider || !metadata.url || !metadata.username)) ||
+    ((type === 'FTP' || type === 'SFTP') && (!metadata.host || !metadata.port || !metadata.username)) ||
+    (type === 'OUTROS' && !metadata.service_name);
+  if (invalid) {
+    throw new SiteCheckError('Preencha os campos obrigatórios do tipo de acesso selecionado.', 400, 'INVALID_CREDENTIAL_PAYLOAD');
+  }
+  return metadata;
 }
 
 export function createApp(options: CreateAppOptions = {}) {
@@ -157,6 +269,9 @@ export function createApp(options: CreateAppOptions = {}) {
     ? createSupabaseAdminAuthProvider()
     : options.authProvider;
   const sessionSecret = options.sessionSecret ?? process.env.ADMIN_SESSION_SECRET ?? '';
+  const monitorCronSecret = options.monitorCronSecret ?? process.env.MONITOR_CRON_SECRET ?? '';
+  const credentialsEncryptionKey = options.credentialsEncryptionKey ?? process.env.CREDENTIALS_ENCRYPTION_KEY ?? '';
+  const masterPasswordHash = options.masterPasswordHash ?? process.env.CREDENTIALS_MASTER_PASSWORD_HASH ?? '';
   const configuredTtl = Number(process.env.ADMIN_SESSION_TTL_SECONDS || DEFAULT_SESSION_TTL_SECONDS);
   const sessionOptions: SessionCookieOptions = {
     secret: sessionSecret,
@@ -170,6 +285,18 @@ export function createApp(options: CreateAppOptions = {}) {
   };
   const loginRateLimiter = options.loginRateLimiter || new LoginRateLimiter();
   const publicStatusRateLimiter = options.publicStatusRateLimiter || new LoginRateLimiter(120, 60_000);
+  const vaultAuthorizationRateLimiter = options.vaultAuthorizationRateLimiter || new LoginRateLimiter(5, 15 * 60_000);
+  const vaultRevealRateLimiter = options.vaultRevealRateLimiter || new LoginRateLimiter(20, 60_000);
+  const vaultSessionOptions: VaultSessionCookieOptions = {
+    secret: sessionSecret,
+    secure: options.secureCookie ?? isProduction,
+    ttlSeconds: options.vaultSessionTtlSeconds ?? DEFAULT_VAULT_SESSION_TTL_SECONDS,
+    now: options.now
+  };
+  const getCredentialRepository = options.getCredentialRepository || (() => {
+    const supabase = getSupabase();
+    return supabase ? new SupabaseCredentialRepository(supabase) : null;
+  });
 
   app.disable('x-powered-by');
   if (options.trustProxy ?? process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
@@ -188,7 +315,7 @@ export function createApp(options: CreateAppOptions = {}) {
         return callback(error);
       },
       methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-      allowedHeaders: ['Content-Type']
+      allowedHeaders: ['Content-Type', 'Authorization']
     })(req, res, next);
   });
   app.use(helmet({
@@ -236,6 +363,91 @@ export function createApp(options: CreateAppOptions = {}) {
       service: 'tecnihub-monitor-backend',
       timestamp: new Date().toISOString()
     });
+  });
+
+  app.get('/api/public/status', async (req, res) => {
+    const rateLimitKey = req.ip || req.socket.remoteAddress || 'unknown';
+    const limit = publicStatusRateLimiter.consume(`public-status:${rateLimitKey}`);
+    if (!limit.allowed) {
+      res.setHeader('Retry-After', String(limit.retryAfterSeconds));
+      return res.status(429).json({ error: 'Limite temporário de consultas atingido.', code: 'PUBLIC_STATUS_RATE_LIMITED' });
+    }
+    res.setHeader('Cache-Control', 'public, max-age=30, stale-while-revalidate=60');
+    const supabase = getSupabase();
+    if (!supabase) return res.status(503).json({ error: 'Página de status temporariamente indisponível.', code: 'PUBLIC_STATUS_UNAVAILABLE' });
+    const overview = await supabase.rpc('get_sites_overview');
+    let rows = overview.data || [];
+    if (overview.error) {
+      // Compatibility path for the controlled interval before migration 003 is
+      // applied. It remains bounded, read-only and exposes only the same public
+      // projection. Historical metrics stay unavailable instead of being invented.
+      const fallback = await supabase
+        .from('sites')
+        .select('id, name, domain, is_active, checks(status, checked_at, response_time)')
+        .eq('is_active', true)
+        .order('created_at', { ascending: false })
+        .order('checked_at', { referencedTable: 'checks', ascending: false })
+        .limit(1, { referencedTable: 'checks' })
+        .limit(1000);
+      if (fallback.error) {
+        return res.status(503).json({ error: 'Página de status temporariamente indisponível.', code: 'PUBLIC_STATUS_UNAVAILABLE' });
+      }
+      rows = (fallback.data || []).map((site: any) => ({
+        site,
+        latest_check: Array.isArray(site.checks) ? site.checks[0] || null : null,
+        metrics: {}
+      }));
+    }
+    const sites = rows
+      .filter((entry: any) => entry.site?.is_active === true)
+      .map((entry: any) => {
+        const site = entry.site;
+        const latest = entry.latest_check;
+        const metric = entry.metrics?.['30d'];
+        return {
+          name: site.name,
+          domain: site.domain,
+          status: publicStatusForSite(site, latest),
+          lastCheckedAt: latest?.checked_at || site.last_checked_at || null,
+          responseTimeMs: latest?.response_time ?? null,
+          uptime30d: metric?.totalChecks > 0 ? {
+            percentage: metric.uptimePercent,
+            reliable: Boolean(metric.hasFullWindow),
+            sampleSize: metric.totalChecks
+          } : null
+        };
+      });
+    return res.json({ generatedAt: new Date().toISOString(), sites });
+  });
+
+  app.post('/api/internal/monitor/run', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const authorization = req.get('authorization') || '';
+    const providedSecret = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+    if (!secretsMatch(providedSecret, monitorCronSecret)) {
+      return res.status(401).json({ error: 'Não autorizado.', code: 'UNAUTHORIZED' });
+    }
+    const supabase = getSupabase();
+    if (!supabase) return sendDatabaseUnavailable(res, isProduction);
+    try {
+      const cycle = await runMonitoringCycle(supabase, BATCH_CONCURRENCY, Date.now(), 'cron');
+      const alerts = cycle.acquired
+        ? await processPendingWebhookDeliveries(supabase)
+        : { delivered: 0, failed: 0 };
+      return res.status(cycle.acquired ? 200 : 202).json({
+        success: true,
+        overlappingRun: !cycle.acquired,
+        runId: cycle.runId,
+        claimed: cycle.claimed,
+        checked: cycle.checked,
+        failed: cycle.failed,
+        concurrency: cycle.concurrency,
+        alerts
+      });
+    } catch (error) {
+      console.error('[Internal Monitor Run]', error instanceof Error ? error.message : 'erro inesperado');
+      return res.status(500).json({ error: 'Falha ao executar ciclo de monitoramento.', code: 'MONITOR_RUN_FAILED' });
+    }
   });
 
   const requireTrustedWriteOrigin = (req: Request, res: Response, next: NextFunction) => {
@@ -293,7 +505,7 @@ export function createApp(options: CreateAppOptions = {}) {
 
   app.post('/api/auth/logout', requireTrustedWriteOrigin, (_req, res) => {
     res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Set-Cookie', clearAdminSessionCookie(sessionOptions));
+    res.setHeader('Set-Cookie', [clearAdminSessionCookie(sessionOptions), clearVaultSessionCookie(vaultSessionOptions)]);
     return res.status(204).end();
   });
 
@@ -329,107 +541,350 @@ export function createApp(options: CreateAppOptions = {}) {
   app.use('/api', requireAdminSession);
   app.use('/api', requireTrustedWriteOrigin);
 
-  app.get('/api/sites', async (_req, res) => {
+  const recordVaultAudit = async (
+    repository: CredentialRepository,
+    req: AuthenticatedRequest,
+    entry: Omit<Parameters<CredentialRepository['audit']>[0], 'admin_id' | 'admin_email'>
+  ) => {
     try {
-      const supabase = getSupabase();
-      if (!supabase) return sendDatabaseUnavailable(res, isProduction);
-
-      const { data: sites, error: sitesError } = await supabase
-        .from('sites')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (sitesError) {
-        return res.status(500).json({ error: 'Falha ao carregar sites.', code: 'SITES_QUERY_FAILED' });
-      }
-
-      const uptimeWindowStart = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-      const enrichedSites = await mapWithConcurrency(sites || [], BATCH_CONCURRENCY, async (site) => {
-        const [checksResult, incidentResult, totalChecksResult, availableChecksResult] = await Promise.all([
-          supabase
-            .from('checks')
-            .select('*')
-            .eq('site_id', site.id)
-            .order('checked_at', { ascending: false })
-            .limit(500),
-          supabase
-            .from('incidents')
-            .select('*')
-            .eq('site_id', site.id)
-            .eq('status', 'active')
-            .limit(1),
-          supabase
-            .from('checks')
-            .select('id', { count: 'exact', head: true })
-            .eq('site_id', site.id)
-            .gte('checked_at', uptimeWindowStart),
-          supabase
-            .from('checks')
-            .select('id', { count: 'exact', head: true })
-            .eq('site_id', site.id)
-            .gte('checked_at', uptimeWindowStart)
-            .in('status', ['online', 'warning'])
-        ]);
-
-        if (checksResult.error || incidentResult.error || totalChecksResult.error || availableChecksResult.error) {
-          throw new SiteCheckError(
-            checksResult.error?.message
-              || incidentResult.error?.message
-              || totalChecksResult.error?.message
-              || availableChecksResult.error?.message
-              || 'Falha ao carregar telemetria.',
-            500,
-            'SITE_TELEMETRY_QUERY_FAILED'
-          );
-        }
-
-        return {
-          site,
-          checks: checksResult.data || [],
-          activeIncident: incidentResult.data?.[0] || null,
-          uptime30d: {
-            totalChecks: totalChecksResult.count || 0,
-            availableChecks: availableChecksResult.count || 0
-          }
-        };
+      await repository.audit({
+        ...entry,
+        admin_id: req.admin!.id,
+        admin_email: req.admin!.email
       });
+    } catch {
+      // Do not include request bodies, database errors or secrets in application logs.
+      console.error('[Vault Audit] Não foi possível registrar uma ação administrativa.');
+    }
+  };
 
-      return res.json({ sites: enrichedSites });
+  const requireVaultAuthorization = async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
+    const authorization = verifyVaultSessionCookie(req.get('cookie'), req.admin!.id, vaultSessionOptions);
+    if (authorization) return next();
+    res.setHeader('Set-Cookie', clearVaultSessionCookie(vaultSessionOptions));
+    const repository = getCredentialRepository();
+    if (repository) {
+      await recordVaultAudit(repository, req, {
+        credential_id: req.params.credentialId || null,
+        site_id: null,
+        action: 'vault_authorization_failed',
+        success: false,
+        details: { reason: 'privileged_session_missing_or_expired' }
+      });
+    }
+    return res.status(403).json({
+      error: 'Autorize o cofre com a senha mestre para continuar.',
+      code: 'VAULT_AUTHORIZATION_REQUIRED'
+    });
+  };
+
+  app.get('/api/vault/session', (req: AuthenticatedRequest, res) => {
+    const authorization = verifyVaultSessionCookie(req.get('cookie'), req.admin!.id, vaultSessionOptions);
+    return res.json({ authorized: Boolean(authorization), expiresAt: authorization ? new Date(authorization.expiresAt * 1000).toISOString() : null });
+  });
+
+  app.post('/api/vault/authorize', async (req: AuthenticatedRequest, res) => {
+    const repository = getCredentialRepository();
+    if (!repository) return sendDatabaseUnavailable(res, isProduction);
+    if (!validateMasterPasswordHashFormat(masterPasswordHash)) {
+      return res.status(503).json({ error: 'Senha mestre do cofre ainda não configurada.', code: 'VAULT_NOT_CONFIGURED' });
+    }
+    const rateLimitKey = `${req.admin!.id}:${req.ip || req.socket.remoteAddress || 'unknown'}`;
+    const limit = vaultAuthorizationRateLimiter.check(rateLimitKey);
+    if (!limit.allowed) {
+      res.setHeader('Retry-After', String(limit.retryAfterSeconds));
+      return res.status(429).json({ error: 'Muitas tentativas. Aguarde para autorizar o cofre novamente.', code: 'VAULT_RATE_LIMITED' });
+    }
+    const password = typeof req.body?.masterPassword === 'string' ? req.body.masterPassword : '';
+    let valid = false;
+    try {
+      valid = await verifyMasterPassword(password, masterPasswordHash);
+    } catch {
+      valid = false;
+    }
+    if (!valid) {
+      vaultAuthorizationRateLimiter.recordFailure(rateLimitKey);
+      await recordVaultAudit(repository, req, {
+        action: 'vault_authorization_failed', success: false, details: { reason: 'invalid_master_password' }
+      });
+      return res.status(401).json({ error: 'Senha mestre inválida.', code: 'INVALID_MASTER_PASSWORD' });
+    }
+    vaultAuthorizationRateLimiter.reset(rateLimitKey);
+    res.setHeader('Set-Cookie', createVaultSessionCookie(req.admin!.id, vaultSessionOptions));
+    await recordVaultAudit(repository, req, { action: 'vault_authorized', success: true });
+    const expiresAt = new Date((options.now?.() ?? Date.now()) + (vaultSessionOptions.ttlSeconds || DEFAULT_VAULT_SESSION_TTL_SECONDS) * 1000).toISOString();
+    return res.json({ authorized: true, expiresAt });
+  });
+
+  app.delete('/api/vault/session', (_req, res) => {
+    res.setHeader('Set-Cookie', clearVaultSessionCookie(vaultSessionOptions));
+    return res.status(204).end();
+  });
+
+  app.get('/api/sites/:siteId/accesses', async (req, res) => {
+    const repository = getCredentialRepository();
+    if (!repository) return sendDatabaseUnavailable(res, isProduction);
+    try {
+      const credentials = await repository.list(req.params.siteId);
+      return res.json({ accesses: credentials.map(sanitizeCredential) });
+    } catch {
+      return res.status(500).json({ error: 'Falha ao carregar os acessos técnicos.', code: 'CREDENTIALS_QUERY_FAILED' });
+    }
+  });
+
+  app.post('/api/sites/:siteId/accesses', async (req: AuthenticatedRequest, res) => {
+    const repository = getCredentialRepository();
+    if (!repository) return sendDatabaseUnavailable(res, isProduction);
+    if (!validateCredentialsEncryptionKey(credentialsEncryptionKey)) {
+      return res.status(503).json({ error: 'Criptografia do cofre ainda não configurada.', code: 'VAULT_NOT_CONFIGURED' });
+    }
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    if (!password || password.length > 4096) {
+      return res.status(400).json({ error: 'Informe uma senha válida para o acesso.', code: 'CREDENTIAL_PASSWORD_REQUIRED' });
+    }
+    try {
+      if (!await repository.siteExists(req.params.siteId)) {
+        return res.status(404).json({ error: 'Site não encontrado.', code: 'SITE_NOT_FOUND' });
+      }
+      const metadata = buildCredentialMetadata(req.body || {});
+      const encrypted = encryptCredentialSecret(password, credentialsEncryptionKey);
+      const credential = await repository.create({
+        site_id: req.params.siteId,
+        ...metadata,
+        secret_ciphertext: encrypted.ciphertext,
+        secret_iv: encrypted.iv,
+        secret_auth_tag: encrypted.authTag,
+        cipher_algorithm: encrypted.cipher,
+        cipher_version: encrypted.version,
+        created_by: req.admin!.id,
+        updated_by: req.admin!.id
+      });
+      await recordVaultAudit(repository, req, {
+        credential_id: credential.id, site_id: credential.site_id, action: 'credential_created', success: true,
+        details: { type: credential.type }
+      });
+      return res.status(201).json({ access: sanitizeCredential(credential) });
     } catch (error) {
       const mapped = getRequestError(error, isProduction);
       return res.status(mapped.statusCode).json({ error: mapped.message, code: mapped.code });
     }
   });
 
-  app.get('/api/incidents', async (_req, res) => {
+  app.patch('/api/accesses/:credentialId', async (req: AuthenticatedRequest, res) => {
+    const repository = getCredentialRepository();
+    if (!repository) return sendDatabaseUnavailable(res, isProduction);
+    if ('password' in (req.body || {}) || 'newPassword' in (req.body || {})) {
+      return res.status(400).json({ error: 'Use a operação privilegiada para alterar a senha.', code: 'USE_PASSWORD_ENDPOINT' });
+    }
+    try {
+      const metadata = buildCredentialMetadata(req.body || {});
+      const credential = await repository.updateMetadata(req.params.credentialId, { ...metadata, updated_by: req.admin!.id });
+      if (!credential) return res.status(404).json({ error: 'Acesso não encontrado.', code: 'CREDENTIAL_NOT_FOUND' });
+      await recordVaultAudit(repository, req, {
+        credential_id: credential.id, site_id: credential.site_id, action: 'credential_updated', success: true,
+        details: { type: credential.type }
+      });
+      return res.json({ access: sanitizeCredential(credential) });
+    } catch (error) {
+      const mapped = getRequestError(error, isProduction);
+      return res.status(mapped.statusCode).json({ error: mapped.message, code: mapped.code });
+    }
+  });
+
+  app.post('/api/accesses/:credentialId/copy-password', requireVaultAuthorization, async (req: AuthenticatedRequest, res) => {
+    const repository = getCredentialRepository();
+    if (!repository) return sendDatabaseUnavailable(res, isProduction);
+    if (!validateCredentialsEncryptionKey(credentialsEncryptionKey)) {
+      return res.status(503).json({ error: 'Criptografia do cofre indisponível.', code: 'VAULT_NOT_CONFIGURED' });
+    }
+    const rateLimitKey = `${req.admin!.id}:${req.params.credentialId}`;
+    const limit = vaultRevealRateLimiter.consume(rateLimitKey);
+    if (!limit.allowed) {
+      res.setHeader('Retry-After', String(limit.retryAfterSeconds));
+      return res.status(429).json({ error: 'Limite de cópias temporariamente atingido.', code: 'VAULT_REVEAL_RATE_LIMITED' });
+    }
+    try {
+      const credential = await repository.get(req.params.credentialId);
+      if (!credential) return res.status(404).json({ error: 'Acesso não encontrado.', code: 'CREDENTIAL_NOT_FOUND' });
+      const password = decryptCredentialSecret({
+        ciphertext: credential.secret_ciphertext,
+        iv: credential.secret_iv,
+        authTag: credential.secret_auth_tag,
+        cipher: credential.cipher_algorithm,
+        version: credential.cipher_version as 1
+      }, credentialsEncryptionKey);
+      await recordVaultAudit(repository, req, {
+        credential_id: credential.id, site_id: credential.site_id, action: 'password_copied', success: true
+      });
+      return res.json({ password });
+    } catch {
+      return res.status(500).json({ error: 'Não foi possível recuperar a senha.', code: 'CREDENTIAL_DECRYPT_FAILED' });
+    }
+  });
+
+  app.put('/api/accesses/:credentialId/password', requireVaultAuthorization, async (req: AuthenticatedRequest, res) => {
+    const repository = getCredentialRepository();
+    if (!repository) return sendDatabaseUnavailable(res, isProduction);
+    if (!validateCredentialsEncryptionKey(credentialsEncryptionKey)) {
+      return res.status(503).json({ error: 'Criptografia do cofre indisponível.', code: 'VAULT_NOT_CONFIGURED' });
+    }
+    const newPassword = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
+    const confirmation = typeof req.body?.confirmation === 'string' ? req.body.confirmation : '';
+    if (!newPassword || newPassword.length > 4096 || newPassword !== confirmation) {
+      return res.status(400).json({ error: 'A nova senha e a confirmação devem coincidir.', code: 'INVALID_NEW_PASSWORD' });
+    }
+    try {
+      const existing = await repository.get(req.params.credentialId);
+      if (!existing) return res.status(404).json({ error: 'Acesso não encontrado.', code: 'CREDENTIAL_NOT_FOUND' });
+      const encrypted = encryptCredentialSecret(newPassword, credentialsEncryptionKey);
+      const credential = await repository.updatePassword(existing.id, {
+        secret_ciphertext: encrypted.ciphertext,
+        secret_iv: encrypted.iv,
+        secret_auth_tag: encrypted.authTag,
+        cipher_algorithm: encrypted.cipher,
+        cipher_version: encrypted.version,
+        updated_by: req.admin!.id
+      });
+      if (!credential) return res.status(404).json({ error: 'Acesso não encontrado.', code: 'CREDENTIAL_NOT_FOUND' });
+      await recordVaultAudit(repository, req, {
+        credential_id: credential.id, site_id: credential.site_id, action: 'password_changed', success: true
+      });
+      return res.json({ access: sanitizeCredential(credential) });
+    } catch {
+      return res.status(500).json({ error: 'Não foi possível alterar a senha.', code: 'CREDENTIAL_PASSWORD_UPDATE_FAILED' });
+    }
+  });
+
+  app.delete('/api/accesses/:credentialId', async (req: AuthenticatedRequest, res) => {
+    const repository = getCredentialRepository();
+    if (!repository) return sendDatabaseUnavailable(res, isProduction);
+    try {
+      const credential = await repository.get(req.params.credentialId);
+      if (!credential) return res.status(404).json({ error: 'Acesso não encontrado.', code: 'CREDENTIAL_NOT_FOUND' });
+      if (!await repository.remove(credential.id)) {
+        return res.status(404).json({ error: 'Acesso não encontrado.', code: 'CREDENTIAL_NOT_FOUND' });
+      }
+      await recordVaultAudit(repository, req, {
+        credential_id: credential.id, site_id: credential.site_id, action: 'credential_removed', success: true,
+        details: { type: credential.type }
+      });
+      return res.status(204).end();
+    } catch {
+      return res.status(500).json({ error: 'Não foi possível remover o acesso.', code: 'CREDENTIAL_DELETE_FAILED' });
+    }
+  });
+
+  app.get('/api/sites', async (_req, res) => {
     const supabase = getSupabase();
     if (!supabase) return sendDatabaseUnavailable(res, isProduction);
+    const { data, error } = await supabase.rpc('get_sites_overview');
+    if (error) return res.status(500).json({ error: 'Falha ao carregar visão consolidada dos sites.', code: 'SITES_OVERVIEW_FAILED' });
+    return res.json({
+      sites: (data || []).map((entry: any) => ({
+        site: entry.site,
+        latestCheck: entry.latest_check,
+        activeIncident: entry.active_incident,
+        domainCache: entry.domain_cache,
+        metrics: entry.metrics || {}
+      }))
+    });
+  });
 
-    const incidents: unknown[] = [];
-    const pageSize = 1000;
-    for (let from = 0; ; from += pageSize) {
-      const { data, error } = await supabase
-        .from('incidents')
-        .select('*')
-        .order('started_at', { ascending: false })
-        .range(from, from + pageSize - 1);
-      if (error) {
-        return res.status(500).json({ error: 'Falha ao carregar incidentes.', code: 'INCIDENTS_QUERY_FAILED' });
+  app.get('/api/sites/:siteId/checks', async (req, res) => {
+    const supabase = getSupabase();
+    if (!supabase) return sendDatabaseUnavailable(res, isProduction);
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : '';
+    let query = supabase
+      .from('checks')
+      .select([
+        'id', 'site_id', 'incident_id', 'checked_at', 'status', 'http_status', 'response_time',
+        'final_url', 'error_type', 'error_message', 'observed_ip', 'dns_records', 'ssl',
+        'expected_content_found', 'wordpress', 'domain_rdap', 'redirect_count',
+        'result_message', 'diagnostics'
+      ].join(','))
+      .eq('site_id', req.params.siteId)
+      .order('checked_at', { ascending: false })
+      .limit(limit + 1);
+    if (cursor) {
+      const cursorDate = new Date(cursor);
+      if (!Number.isFinite(cursorDate.getTime())) {
+        return res.status(400).json({ error: 'Cursor de histórico inválido.', code: 'INVALID_CURSOR' });
       }
-      incidents.push(...(data || []));
-      if (!data || data.length < pageSize) break;
+      query = query.lt('checked_at', cursorDate.toISOString());
     }
-    return res.json({ incidents });
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ error: 'Falha ao carregar histórico.', code: 'CHECK_HISTORY_FAILED' });
+    const rows = (data || []) as unknown as any[];
+    const hasMore = rows.length > limit;
+    const checks = rows.slice(0, limit);
+    return res.json({
+      checks,
+      pagination: { limit, hasMore, nextCursor: hasMore ? checks[checks.length - 1]?.checked_at : null }
+    });
+  });
+
+  app.get('/api/sites/:siteId/metrics', async (req, res) => {
+    const supabase = getSupabase();
+    if (!supabase) return sendDatabaseUnavailable(res, isProduction);
+    const period = typeof req.query.period === 'string' && ['24h', '7d', '30d', '90d'].includes(req.query.period)
+      ? req.query.period
+      : '24h';
+    const [metricsResult, seriesResult] = await Promise.all([
+      supabase.rpc('calculate_site_metrics', { p_site_id: req.params.siteId }),
+      supabase.rpc('get_site_monitoring_series', { p_site_id: req.params.siteId, p_period: period })
+    ]);
+    if (metricsResult.error || seriesResult.error) {
+      return res.status(500).json({ error: 'Falha ao calcular métricas reais.', code: 'SITE_METRICS_FAILED' });
+    }
+    return res.json({ metrics: metricsResult.data || {}, period, series: seriesResult.data || [] });
+  });
+
+  app.get('/api/incidents', async (req, res) => {
+    const supabase = getSupabase();
+    if (!supabase) return sendDatabaseUnavailable(res, isProduction);
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 100));
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : '';
+    let query = supabase
+      .from('incidents')
+      .select('*, sites(client_name, name, url, domain)')
+      .order('started_at', { ascending: false })
+      .limit(limit + 1);
+    if (cursor) {
+      const cursorDate = new Date(cursor);
+      if (!Number.isFinite(cursorDate.getTime())) {
+        return res.status(400).json({ error: 'Cursor de incidentes inválido.', code: 'INVALID_CURSOR' });
+      }
+      query = query.lt('started_at', cursorDate.toISOString());
+    }
+    const { data, error } = await query;
+    if (error) return res.status(500).json({ error: 'Falha ao carregar incidentes.', code: 'INCIDENTS_QUERY_FAILED' });
+    const rows = data || [];
+    const hasMore = rows.length > limit;
+    const incidents = rows.slice(0, limit);
+    return res.json({
+      incidents,
+      pagination: { limit, hasMore, nextCursor: hasMore ? incidents[incidents.length - 1]?.started_at : null }
+    });
   });
 
   app.patch('/api/incidents/:incidentId/resolve', async (req, res) => {
     const supabase = getSupabase();
     if (!supabase) return sendDatabaseUnavailable(res, isProduction);
 
-    const resolvedAt = new Date().toISOString();
+    const { data: active } = await supabase
+      .from('incidents')
+      .select('id, started_at')
+      .eq('id', req.params.incidentId)
+      .eq('status', 'active')
+      .maybeSingle();
+    if (!active) return res.status(404).json({ error: 'Incidente ativo não encontrado.', code: 'ACTIVE_INCIDENT_NOT_FOUND' });
+    const resolvedDate = new Date();
+    const resolvedAt = resolvedDate.toISOString();
+    const durationSeconds = Math.max(0, Math.floor((resolvedDate.getTime() - new Date(active.started_at).getTime()) / 1000));
     const { data, error } = await supabase
       .from('incidents')
-      .update({ status: 'resolved', resolved_at: resolvedAt })
+      .update({ status: 'resolved', resolved_at: resolvedAt, duration_seconds: durationSeconds })
       .eq('id', req.params.incidentId)
       .eq('status', 'active')
       .select('*')
@@ -438,6 +893,62 @@ export function createApp(options: CreateAppOptions = {}) {
       return res.status(404).json({ error: 'Incidente ativo não encontrado.', code: 'ACTIVE_INCIDENT_NOT_FOUND' });
     }
     return res.json({ incident: data });
+  });
+
+  app.get('/api/alerts/config', async (_req, res) => {
+    const supabase = getSupabase();
+    if (!supabase) return sendDatabaseUnavailable(res, isProduction);
+    const [webhookResult, deliveriesResult] = await Promise.all([
+      supabase.from('alert_webhooks').select('*').order('created_at', { ascending: true }).limit(1).maybeSingle(),
+      supabase.from('alert_deliveries')
+        .select('id, event_type, status, attempt_count, response_status, error_message, created_at, attempted_at, delivered_at')
+        .order('created_at', { ascending: false })
+        .limit(20)
+    ]);
+    if (webhookResult.error || deliveriesResult.error) {
+      return res.status(500).json({ error: 'Falha ao carregar configuração de alertas.', code: 'ALERT_CONFIG_FAILED' });
+    }
+    return res.json({
+      webhook: webhookResult.data || null,
+      email: { configured: false, functional: false, label: 'E-mail não configurado' },
+      recentDeliveries: deliveriesResult.data || []
+    });
+  });
+
+  app.put('/api/alerts/webhook', async (req, res) => {
+    try {
+      const supabase = getSupabase();
+      if (!supabase) return sendDatabaseUnavailable(res, isProduction);
+      const allowedEvents = new Set(['incident_confirmed', 'recovery', 'ssl_expiring', 'dns_changed']);
+      const eventTypes = Array.isArray(req.body?.eventTypes)
+        ? req.body.eventTypes.filter((value: unknown) => typeof value === 'string' && allowedEvents.has(value))
+        : ['incident_confirmed', 'recovery'];
+      if (!eventTypes.length) {
+        return res.status(400).json({ error: 'Selecione ao menos um evento de webhook.', code: 'INVALID_ALERT_EVENTS' });
+      }
+      const enabled = req.body?.enabled !== false;
+      const urlInput = String(req.body?.url || '').trim();
+      if (enabled && !urlInput) {
+        return res.status(400).json({ error: 'URL do webhook é obrigatória quando o canal está ativo.', code: 'WEBHOOK_URL_REQUIRED' });
+      }
+      const url = urlInput ? await validateAdministrativeUrl(urlInput) : '';
+      const timeoutMs = Math.max(1000, Math.min(15000, Number(req.body?.timeoutMs) || 5000));
+      const { data: current, error: currentError } = await supabase
+        .from('alert_webhooks').select('id').order('created_at', { ascending: true }).limit(1).maybeSingle();
+      if (currentError) throw new SiteCheckError('Falha ao consultar webhook.', 500, 'WEBHOOK_QUERY_FAILED');
+      const payload = {
+        name: 'Webhook principal', url, enabled, timeout_ms: timeoutMs, event_types: eventTypes
+      };
+      const operation = current
+        ? supabase.from('alert_webhooks').update(payload).eq('id', current.id).select('*').single()
+        : supabase.from('alert_webhooks').insert(payload).select('*').single();
+      const { data, error } = await operation;
+      if (error || !data) throw new SiteCheckError('Falha ao salvar webhook.', 500, 'WEBHOOK_SAVE_FAILED');
+      return res.json({ webhook: data });
+    } catch (error) {
+      const mapped = getRequestError(error, isProduction);
+      return res.status(mapped.statusCode).json({ error: mapped.message, code: mapped.code });
+    }
   });
 
   app.post('/api/sites', async (req, res) => {
@@ -460,7 +971,11 @@ export function createApp(options: CreateAppOptions = {}) {
       }
       payload.url = await validateAdministrativeUrl(payload.url);
 
-      const { data, error } = await supabase.from('sites').insert(payload).select('*').single();
+      const { data, error } = await supabase.from('sites').insert({
+        ...payload,
+        next_check_at: payload.is_active ? new Date().toISOString() : null,
+        monitoring_state: payload.is_active ? 'pending' : 'paused'
+      }).select('*').single();
       if (error || !data) {
         return res.status(500).json({ error: 'Falha ao cadastrar site.', code: 'SITE_CREATE_FAILED' });
       }
@@ -478,7 +993,8 @@ export function createApp(options: CreateAppOptions = {}) {
 
       const allowedFields = new Set([
         'client_name', 'name', 'url', 'domain', 'hosting_provider', 'is_wordpress',
-        'check_interval', 'expected_content', 'expected_ga4_id', 'expected_gtm_id',
+        'check_interval', 'monitor_response_time', 'monitor_ssl', 'monitor_domain',
+        'expected_content', 'expected_ga4_id', 'expected_gtm_id',
         'expected_google_ads_id', 'expected_meta_pixel_id', 'uses_search_console', 'uses_rd_station'
       ]);
       const updatePayload: Record<string, unknown> = {};
@@ -498,6 +1014,7 @@ export function createApp(options: CreateAppOptions = {}) {
           code: 'INVALID_CHECK_INTERVAL'
         });
       }
+      if ('check_interval' in updatePayload) updatePayload.next_check_at = new Date().toISOString();
       if (!Object.keys(updatePayload).length) {
         return res.status(400).json({ error: 'Nenhum campo válido foi enviado.', code: 'EMPTY_UPDATE' });
       }
@@ -527,7 +1044,15 @@ export function createApp(options: CreateAppOptions = {}) {
 
     const { data, error } = await supabase
       .from('sites')
-      .update({ is_active: req.body.isActive })
+      .update({
+        is_active: req.body.isActive,
+        monitoring_state: req.body.isActive ? 'pending' : 'paused',
+        next_check_at: req.body.isActive ? new Date().toISOString() : null,
+        monitoring_claimed_by: null,
+        monitoring_claimed_until: null,
+        consecutive_failures: 0,
+        consecutive_successes: 0
+      })
       .eq('id', req.params.siteId)
       .select('id, is_active')
       .single();
@@ -551,7 +1076,9 @@ export function createApp(options: CreateAppOptions = {}) {
     }
 
     const confirmation = String(req.body?.confirmation || '').trim().toLowerCase();
-    if (confirmation !== site.domain.toLowerCase() && confirmation !== site.name.toLowerCase()) {
+    const expectedDomain = String(site.domain).trim().toLowerCase();
+    const expectedName = String(site.name).trim().toLowerCase();
+    if (confirmation !== expectedDomain && confirmation !== expectedName) {
       return res.status(400).json({
         error: `Digite exatamente "${site.domain}" para confirmar a exclusão definitiva.`,
         code: 'DELETE_CONFIRMATION_MISMATCH'
@@ -604,13 +1131,19 @@ export function createApp(options: CreateAppOptions = {}) {
 
       const { data, error } = await supabase
         .from('sites')
-        .select('id, url, name, is_active')
-        .eq('is_active', true);
+        .select([
+          'id', 'url', 'name', 'domain', 'is_active', 'is_wordpress', 'check_interval',
+          'monitor_response_time', 'monitor_ssl', 'monitor_domain',
+          'expected_content', 'expected_ga4_id', 'expected_gtm_id',
+          'expected_google_ads_id', 'expected_meta_pixel_id', 'uses_rd_station'
+        ].join(','))
+        .eq('is_active', true)
+        .limit(500);
       if (error) {
         return res.status(500).json({ error: 'Falha ao carregar sites ativos.', code: 'ACTIVE_SITES_QUERY_FAILED' });
       }
 
-      const activeSites = (data || []) as SiteRecordForCheck[];
+      const activeSites = (data || []) as unknown as SiteRecordForCheck[];
       const results = await mapWithConcurrency(activeSites, BATCH_CONCURRENCY, async (site) => {
         try {
           return await processSiteCheck(
@@ -644,7 +1177,6 @@ export function createApp(options: CreateAppOptions = {}) {
   });
 
   const distPath = path.resolve(process.cwd(), 'dist');
-  app.get('/', (_req, res) => res.redirect(302, '/admin'));
   app.use(express.static(distPath));
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api/')) return next();
@@ -672,11 +1204,6 @@ export function startServer() {
     console.log(`  Anti-SSRF com DNS pinning | Concorrência: ${BATCH_CONCURRENCY}`);
     console.log('========================================================');
   });
-  const stopScheduler = startMonitoringScheduler(getServerSupabase, {
-    enabled: process.env.MONITORING_SCHEDULER_ENABLED === 'true',
-    concurrency: BATCH_CONCURRENCY
-  });
-  server.on('close', stopScheduler);
   return server;
 }
 

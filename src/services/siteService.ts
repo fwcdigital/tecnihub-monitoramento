@@ -7,7 +7,10 @@ import {
   Incident,
   IncidentType,
   HostingProvider,
-  MonitoringFrequency
+  MonitoringFrequency,
+  SiteMetrics,
+  MonitoringSeriesPoint,
+  TrackingToolResult
 } from '../types';
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
@@ -73,7 +76,9 @@ export function mapDbSiteToSite(
   dbSite: DbSite,
   checks: DbCheck[] = [],
   activeIncident?: DbIncident | null,
-  uptimeCounts?: { totalChecks: number; availableChecks: number }
+  uptimeCounts?: { totalChecks: number; availableChecks: number },
+  metrics: SiteMetrics = {},
+  domainCache?: Record<string, any> | null
 ): Site {
   const latestCheck = checks[0] || null;
   const latestResponseSeconds = latestCheck?.response_time !== null && latestCheck?.response_time !== undefined
@@ -85,12 +90,18 @@ export function mapDbSiteToSite(
   const avgResponseSeconds = validResponseTimes.length
     ? +(validResponseTimes.reduce((sum, value) => sum + value, 0) / validResponseTimes.length).toFixed(2)
     : null;
-  const uptime = uptimeCounts?.totalChecks
+  const uptime30dMetric = metrics['30d'];
+  const uptime = uptime30dMetric?.totalChecks
+    ? Number(uptime30dMetric.uptimePercent)
+    : uptimeCounts?.totalChecks
     ? +((uptimeCounts.availableChecks / uptimeCounts.totalChecks) * 100).toFixed(2)
     : null;
 
   let currentStatus: Site['status'] = 'unknown';
   if (!dbSite.is_active) currentStatus = 'paused';
+  else if (dbSite.monitoring_state === 'security_blocked') currentStatus = 'security_blocked';
+  else if (dbSite.monitoring_state === 'suspected_failure' || dbSite.monitoring_state === 'recovering') currentStatus = 'warning';
+  else if (dbSite.monitoring_state === 'pending') currentStatus = 'unknown';
   else if (latestCheck) currentStatus = latestCheck.status;
 
   const checksHistory: CheckRecord[] = checks.map((check) => ({
@@ -100,8 +111,34 @@ export function mapDbSiteToSite(
     status: check.status,
     httpCode: check.http_status ?? (check.status === 'offline' ? 'ERR' : 'Indisponível'),
     responseTime: check.response_time ? +(check.response_time / 1000).toFixed(2) : 0,
-    result: check.error_message || (check.http_status !== null ? `HTTP ${check.http_status}` : 'Sem detalhe disponível')
+    result: check.result_message || check.error_message || (check.http_status !== null ? `HTTP ${check.http_status}` : 'Sem detalhe disponível'),
+    expectedContentFound: check.expected_content_found ?? undefined,
+    errorType: check.error_type || undefined,
+    errorMessage: check.error_message || undefined,
+    incidentId: check.incident_id || undefined,
+    observedIp: check.observed_ip || undefined
   }));
+
+  const trackingDiagnostics = latestCheck?.diagnostics?.tracking as Record<string, any> | undefined;
+  const trackingResult = (key: string): TrackingToolResult | undefined => {
+    const value = trackingDiagnostics?.[key];
+    if (!value) return undefined;
+    const expectedMismatch = value.expectedId && value.expectedIdFound === false;
+    return {
+      detected: Boolean(value.detected),
+      foundId: Array.isArray(value.foundIds) ? value.foundIds[0] : undefined,
+      expectedId: value.expectedId,
+      status: expectedMismatch ? 'red' : value.detected ? 'green' : 'gray',
+      statusLabel: expectedMismatch ? 'Tag esperada não detectada' : value.detected ? 'Tag detectada' : 'Não detectada',
+      message: value.detected
+        ? 'Evidência encontrada no HTML; funcionamento não confirmado.'
+        : 'Nenhuma evidência encontrada no HTML analisado.',
+      lastDetectedAt: latestCheck?.checked_at,
+      detectionMethod: 'HTML estático'
+    };
+  };
+  const ssl = latestCheck?.ssl || null;
+  const domainInfo = latestCheck?.domain_rdap || domainCache || null;
 
   return {
     id: dbSite.id,
@@ -115,25 +152,26 @@ export function mapDbSiteToSite(
     isWordPress: dbSite.is_wordpress,
     isActive: dbSite.is_active,
     uptime30d: uptime,
+    uptime30dReliable: uptime30dMetric ? Boolean(uptime30dMetric.hasFullWindow) : Boolean(uptimeCounts?.totalChecks),
     responseTime: latestCheck && currentStatus !== 'offline' ? latestResponseSeconds : null,
-    avgResponseTime: avgResponseSeconds,
-    // These collectors do not exist in the MVP yet. Null is intentional: the UI
-    // must never turn absent telemetry into an invented operational value.
-    sslValid: null,
-    sslDaysRemaining: null,
-    domainDaysRemaining: null,
+    avgResponseTime: metrics['24h']?.avgResponseMs !== null && metrics['24h']?.avgResponseMs !== undefined
+      ? +(Number(metrics['24h']!.avgResponseMs) / 1000).toFixed(2)
+      : avgResponseSeconds,
+    sslValid: typeof ssl?.valid === 'boolean' ? ssl.valid : null,
+    sslDaysRemaining: typeof ssl?.daysRemaining === 'number' ? ssl.daysRemaining : null,
+    domainDaysRemaining: typeof domainInfo?.daysRemaining === 'number'
+      ? domainInfo.daysRemaining
+      : typeof domainInfo?.days_remaining === 'number' ? domainInfo.days_remaining : null,
     lastCheck: latestCheck ? formatRelativeTime(latestCheck.checked_at) : 'Aguardando',
     httpStatus: latestCheck?.http_status ?? (latestCheck?.status === 'offline' ? 'ERR' : null),
     monitorAvailability: true,
-    monitorResponseTime: true,
-    monitorSsl: false,
-    monitorDomain: false,
+    monitorResponseTime: dbSite.monitor_response_time !== false,
+    monitorSsl: dbSite.monitor_ssl !== false,
+    monitorDomain: dbSite.monitor_domain !== false,
     monitorRedirects: true,
     monitorContent: Boolean(dbSite.expected_content),
     expectedContentText: dbSite.expected_content || '',
-    consecutiveFailures: checks.findIndex((check) => check.status !== 'offline' && check.status !== 'critical') === -1
-      ? checks.length
-      : checks.findIndex((check) => check.status !== 'offline' && check.status !== 'critical'),
+    consecutiveFailures: dbSite.consecutive_failures ?? 0,
     createdAt: dbSite.created_at?.slice(0, 10) || 'Indisponível',
     updatedAt: dbSite.updated_at,
     activeIncidentId: activeIncident?.id,
@@ -145,8 +183,24 @@ export function mapDbSiteToSite(
       metaPixel: { enabled: Boolean(dbSite.expected_meta_pixel_id), expectedId: dbSite.expected_meta_pixel_id || '' },
       searchConsole: { enabled: dbSite.uses_search_console, searchConsoleConfigured: dbSite.uses_search_console },
       rdStation: { enabled: dbSite.uses_rd_station, expectedId: '' },
-      lastCheckedAt: undefined
-    }
+      lastCheckedAt: latestCheck?.checked_at,
+      results: trackingDiagnostics ? {
+        ga4: trackingResult('ga4')!,
+        gtm: trackingResult('gtm')!,
+        googleAds: trackingResult('googleAds')!,
+        metaPixel: trackingResult('metaPixel')!,
+        searchConsole: {
+          detected: false, status: 'gray', statusLabel: 'Verificação não disponível',
+          message: 'A propriedade não pode ser confirmada por HTML.'
+        },
+        rdStation: trackingResult('rdStation')!
+      } : undefined
+    },
+    metrics,
+    dns: latestCheck?.dns_records || undefined,
+    ssl,
+    domainInfo,
+    wordpress: latestCheck?.wordpress || null
   };
 }
 
@@ -154,13 +208,21 @@ export async function getSitesFromDatabase(): Promise<Site[]> {
   const response = await apiRequest<{
     sites: Array<{
       site: DbSite;
-      checks: DbCheck[];
+      latestCheck: DbCheck | null;
       activeIncident: DbIncident | null;
-      uptime30d: { totalChecks: number; availableChecks: number };
+      domainCache: Record<string, any> | null;
+      metrics: SiteMetrics;
     }>;
   }>('/api/sites');
   return response.sites.map((entry) =>
-    mapDbSiteToSite(entry.site, entry.checks, entry.activeIncident, entry.uptime30d)
+    mapDbSiteToSite(
+      entry.site,
+      entry.latestCheck ? [entry.latestCheck] : [],
+      entry.activeIncident,
+      undefined,
+      entry.metrics,
+      entry.domainCache
+    )
   );
 }
 
@@ -201,31 +263,44 @@ export function mapDbIncidentToIncident(dbIncident: DbIncident, sites: Site[]): 
   return {
     id: dbIncident.id,
     siteId: dbIncident.site_id,
-    client: site?.client || 'Site não encontrado',
-    siteName: site?.siteName || 'Cadastro indisponível',
-    url: site?.url || '',
+    client: site?.client || dbIncident.sites?.client_name || 'Site não encontrado',
+    siteName: site?.siteName || dbIncident.sites?.name || 'Cadastro indisponível',
+    url: site?.url || dbIncident.sites?.url || '',
     type: dbIncident.type as IncidentType,
     severity: dbIncident.severity,
     status: dbIncident.status,
     startedAt: dbIncident.started_at,
     createdAt: formatFullDate(dbIncident.started_at),
-    duration: formatIncidentDuration(dbIncident.started_at, dbIncident.resolved_at),
+    duration: dbIncident.duration_seconds !== null && dbIncident.duration_seconds !== undefined
+      ? formatIncidentDuration(dbIncident.started_at, new Date(new Date(dbIncident.started_at).getTime() + dbIncident.duration_seconds * 1000).toISOString())
+      : formatIncidentDuration(dbIncident.started_at, dbIncident.resolved_at),
     resolvedAt: dbIncident.resolved_at ? formatFullDate(dbIncident.resolved_at) : undefined,
     resolvedAtIso: dbIncident.resolved_at || undefined,
     httpReturned: incidentFailure?.httpCode ?? 'Indisponível',
-    failedChecksCount: failureChecks.length || null,
+    failedChecksCount: dbIncident.failed_checks_count || failureChecks.length || null,
     lastSuccessfulCheck: lastSuccess?.timestamp || 'Sem registro disponível',
     firstErrorCheck: firstFailure?.timestamp || 'Sem registro disponível',
     currentStatus: dbIncident.status === 'resolved'
       ? 'Resolvido'
       : latestCheck?.result || 'Incidente ativo; aguardando nova verificação',
-    explanation: dbIncident.description || dbIncident.title
+    explanation: dbIncident.description || dbIncident.reason || dbIncident.title
   };
 }
 
 export async function getIncidentsFromDatabase(sites: Site[]): Promise<Incident[]> {
-  const response = await apiRequest<{ incidents: DbIncident[] }>('/api/incidents');
-  return response.incidents.map((incident) => mapDbIncidentToIncident(incident, sites));
+  const incidents: DbIncident[] = [];
+  let cursor: string | null = null;
+  do {
+    const query = new URLSearchParams({ limit: '100' });
+    if (cursor) query.set('cursor', cursor);
+    const response = await apiRequest<{
+      incidents: DbIncident[];
+      pagination: { hasMore: boolean; nextCursor: string | null };
+    }>(`/api/incidents?${query}`);
+    incidents.push(...response.incidents);
+    cursor = response.pagination.hasMore ? response.pagination.nextCursor : null;
+  } while (cursor);
+  return incidents.map((incident) => mapDbIncidentToIncident(incident, sites));
 }
 
 export async function resolveIncidentInDatabase(incidentId: string): Promise<DbIncident> {
@@ -234,6 +309,64 @@ export async function resolveIncidentInDatabase(incidentId: string): Promise<DbI
     body: JSON.stringify({})
   });
   return response.incident;
+}
+
+export async function getSiteChecksPage(
+  siteId: string,
+  limit = 50,
+  cursor?: string | null
+): Promise<{ checks: CheckRecord[]; hasMore: boolean; nextCursor: string | null }> {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (cursor) query.set('cursor', cursor);
+  const response = await apiRequest<{
+    checks: DbCheck[];
+    pagination: { hasMore: boolean; nextCursor: string | null };
+  }>(`/api/sites/${encodeURIComponent(siteId)}/checks?${query}`);
+  const mapped = mapDbSiteToSite({
+    id: siteId, client_name: '', name: '', url: '', domain: '', hosting_provider: 'Outro',
+    is_wordpress: false, is_active: true, check_interval: '5min', uses_search_console: false,
+    uses_rd_station: false, created_at: '', updated_at: ''
+  }, response.checks).checksHistory;
+  return { checks: mapped, hasMore: response.pagination.hasMore, nextCursor: response.pagination.nextCursor };
+}
+
+export async function getSiteMonitoringMetrics(
+  siteId: string,
+  period: '24h' | '7d' | '30d' | '90d'
+): Promise<{ metrics: SiteMetrics; series: MonitoringSeriesPoint[] }> {
+  const response = await apiRequest<{ metrics: SiteMetrics; series: MonitoringSeriesPoint[] }>(
+    `/api/sites/${encodeURIComponent(siteId)}/metrics?period=${period}`
+  );
+  return { metrics: response.metrics, series: response.series };
+}
+
+export interface AlertWebhookConfig {
+  id?: string;
+  url: string;
+  enabled: boolean;
+  timeout_ms: number;
+  event_types: Array<'incident_confirmed' | 'recovery' | 'ssl_expiring' | 'dns_changed'>;
+}
+
+export async function getAlertConfiguration(): Promise<{
+  webhook: AlertWebhookConfig | null;
+  email: { configured: boolean; functional: boolean; label: string };
+  recentDeliveries: Array<Record<string, any>>;
+}> {
+  return apiRequest('/api/alerts/config');
+}
+
+export async function saveAlertWebhook(config: {
+  url: string;
+  enabled: boolean;
+  timeoutMs: number;
+  eventTypes: AlertWebhookConfig['event_types'];
+}): Promise<AlertWebhookConfig> {
+  const response = await apiRequest<{ webhook: AlertWebhookConfig }>('/api/alerts/webhook', {
+    method: 'PUT',
+    body: JSON.stringify(config)
+  });
+  return response.webhook;
 }
 
 function mapSiteToPayload(siteData: Partial<Site>) {
@@ -245,12 +378,15 @@ function mapSiteToPayload(siteData: Partial<Site>) {
     hosting_provider: siteData.hosting,
     is_wordpress: Boolean(siteData.isWordPress),
     check_interval: siteData.frequency,
+    monitor_response_time: siteData.monitorResponseTime,
+    monitor_ssl: siteData.monitorSsl,
+    monitor_domain: siteData.monitorDomain,
     expected_content: siteData.expectedContentText || null,
     expected_ga4_id: siteData.tracking?.ga4?.expectedId || null,
     expected_gtm_id: siteData.tracking?.gtm?.expectedId || null,
     expected_google_ads_id: siteData.tracking?.googleAds?.expectedId || null,
     expected_meta_pixel_id: siteData.tracking?.metaPixel?.expectedId || null,
-    uses_search_console: Boolean(siteData.tracking?.searchConsole?.searchConsoleConfigured),
+    uses_search_console: Boolean(siteData.tracking?.searchConsole?.enabled && siteData.tracking?.searchConsole?.searchConsoleConfigured),
     uses_rd_station: Boolean(siteData.tracking?.rdStation?.enabled)
   };
 }
@@ -306,7 +442,7 @@ export async function checkSiteNow(siteId: string): Promise<{
   siteId?: string;
   checkId?: string;
   result: {
-    status: 'online' | 'warning' | 'critical' | 'offline';
+    status: 'online' | 'warning' | 'critical' | 'offline' | 'security_blocked';
     httpStatus: number | null;
     responseTime: number;
     finalUrl: string;
