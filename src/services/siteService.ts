@@ -81,27 +81,44 @@ export function mapDbSiteToSite(
   domainCache?: Record<string, any> | null
 ): Site {
   const latestCheck = checks[0] || null;
-  const latestResponseSeconds = latestCheck?.response_time !== null && latestCheck?.response_time !== undefined
+  const hasValidResponseTime = (check: DbCheck | null): check is DbCheck => Boolean(
+    check
+    && check.incident_eligible !== true
+    && check.http_status !== null
+    && check.response_time !== null
+    && check.response_time !== undefined
+    && Number(check.response_time) > 0
+  );
+  const latestResponseSeconds = hasValidResponseTime(latestCheck)
     ? +(latestCheck.response_time / 1000).toFixed(2)
     : null;
   const validResponseTimes = checks
-    .filter((check) => check.response_time && check.response_time > 0)
+    .filter((check) => hasValidResponseTime(check))
     .map((check) => Number(check.response_time) / 1000);
   const avgResponseSeconds = validResponseTimes.length
     ? +(validResponseTimes.reduce((sum, value) => sum + value, 0) / validResponseTimes.length).toFixed(2)
     : null;
   const uptime30dMetric = metrics['30d'];
-  const uptime = uptime30dMetric?.totalChecks
-    ? Number(uptime30dMetric.uptimePercent)
-    : uptimeCounts?.totalChecks
-    ? +((uptimeCounts.availableChecks / uptimeCounts.totalChecks) * 100).toFixed(2)
+  const metricTotalChecks = Number(uptime30dMetric?.totalChecks || 0);
+  const metricUptime = uptime30dMetric?.uptimePercent;
+  const fallbackTotalChecks = Number(uptimeCounts?.totalChecks || 0);
+  const fallbackAvailableChecks = Number(uptimeCounts?.availableChecks || 0);
+  const uptime = metricTotalChecks > 0 && metricUptime !== null && metricUptime !== undefined
+    ? Number(metricUptime)
+    : fallbackTotalChecks > 0
+    ? +((fallbackAvailableChecks / fallbackTotalChecks) * 100).toFixed(2)
     : null;
 
   let currentStatus: Site['status'] = 'unknown';
   if (!dbSite.is_active) currentStatus = 'paused';
   else if (dbSite.monitoring_state === 'security_blocked') currentStatus = 'security_blocked';
+  else if (activeIncident) {
+    if (latestCheck?.status === 'offline' || latestCheck?.status === 'critical') currentStatus = latestCheck.status;
+    else if (latestCheck) currentStatus = 'warning';
+    else currentStatus = 'critical';
+  }
   else if (dbSite.monitoring_state === 'suspected_failure' || dbSite.monitoring_state === 'recovering') currentStatus = 'warning';
-  else if (dbSite.monitoring_state === 'pending') currentStatus = 'unknown';
+  else if (dbSite.monitoring_state === 'down') currentStatus = latestCheck?.status === 'offline' ? 'offline' : 'critical';
   else if (latestCheck) currentStatus = latestCheck.status;
 
   const checksHistory: CheckRecord[] = checks.map((check) => ({
@@ -110,7 +127,7 @@ export function mapDbSiteToSite(
     checkedAt: check.checked_at,
     status: check.status,
     httpCode: check.http_status ?? (check.status === 'offline' ? 'ERR' : 'Indisponível'),
-    responseTime: check.response_time ? +(check.response_time / 1000).toFixed(2) : 0,
+    responseTime: hasValidResponseTime(check) ? +(check.response_time / 1000).toFixed(2) : 0,
     result: check.result_message || check.error_message || (check.http_status !== null ? `HTTP ${check.http_status}` : 'Sem detalhe disponível'),
     expectedContentFound: check.expected_content_found ?? undefined,
     errorType: check.error_type || undefined,
@@ -153,7 +170,7 @@ export function mapDbSiteToSite(
     isActive: dbSite.is_active,
     uptime30d: uptime,
     uptime30dReliable: uptime30dMetric ? Boolean(uptime30dMetric.hasFullWindow) : Boolean(uptimeCounts?.totalChecks),
-    responseTime: latestCheck && currentStatus !== 'offline' ? latestResponseSeconds : null,
+    responseTime: latestResponseSeconds,
     avgResponseTime: metrics['24h']?.avgResponseMs !== null && metrics['24h']?.avgResponseMs !== undefined
       ? +(Number(metrics['24h']!.avgResponseMs) / 1000).toFixed(2)
       : avgResponseSeconds,

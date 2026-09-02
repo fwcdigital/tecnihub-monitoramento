@@ -167,6 +167,7 @@ export interface DbCheck {
   status: 'online' | 'warning' | 'critical' | 'offline' | 'security_blocked';
   http_status: number | null;
   response_time: number | null;
+  incident_eligible?: boolean;
   final_url?: string | null;
   error_type?: string | null;
   error_message?: string | null;

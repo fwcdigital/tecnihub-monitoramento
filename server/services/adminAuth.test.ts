@@ -528,7 +528,11 @@ describe('hardening HTTP e configuração de produção', () => {
               monitoring_state: 'online', client_name: 'interno',
               technical_credentials: [{ username: 'nao-publicar', secret_ciphertext: 'cipher-nao-publicar' }]
             },
-            latest_check: { status: 'online', checked_at: '2026-09-01T12:00:00.000Z', response_time: 120 },
+            latest_check: {
+              status: 'online', checked_at: '2026-09-01T12:00:00.000Z', http_status: 200,
+              response_time: 120, incident_eligible: false
+            },
+            active_incident: { id: 'incident-recovering' },
             metrics: { '30d': { totalChecks: 10, uptimePercent: 100, hasFullWindow: false } }
           }, {
             site: { id: 'inactive-secret-id', name: 'Inativo', domain: 'inactive.example', is_active: false, monitoring_state: 'paused' },
@@ -547,6 +551,8 @@ describe('hardening HTTP e configuração de produção', () => {
     assert.equal(JSON.stringify(payload).includes('interno'), false);
     assert.equal(JSON.stringify(payload).includes('nao-publicar'), false);
     assert.equal(JSON.stringify(payload).includes('cipher-nao-publicar'), false);
+    assert.equal(payload.sites[0].status, 'warning');
+    assert.equal(payload.sites[0].responseTimeMs, 120);
 
     const writeAttempt = await fetch(`${baseUrl}/api/public/status`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Origin: baseUrl }, body: '{}'

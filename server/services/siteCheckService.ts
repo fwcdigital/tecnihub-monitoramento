@@ -180,7 +180,9 @@ async function persistStructuredResult(
     p_checked_at: checkedAt,
     p_status: result.status,
     p_http_status: result.httpStatus,
-    p_response_time: site.monitor_response_time === false || result.httpStatus === null ? null : result.responseTime,
+    p_response_time: site.monitor_response_time === false || result.httpStatus === null || result.incidentEligible
+      ? null
+      : result.responseTime,
     p_final_url: result.finalUrl,
     p_error_type: result.errorType || null,
     p_error_message: result.errorMessage || null,

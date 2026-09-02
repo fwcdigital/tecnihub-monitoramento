@@ -113,8 +113,13 @@ function sendDatabaseUnavailable(res: Response, isProduction: boolean) {
   });
 }
 
-function publicStatusForSite(site: any, latestCheck: any): 'online' | 'warning' | 'critical' | 'offline' | 'unknown' {
+function publicStatusForSite(site: any, latestCheck: any, activeIncident?: any): 'online' | 'warning' | 'critical' | 'offline' | 'unknown' {
+  if (activeIncident && !latestCheck) return 'critical';
   if (!latestCheck) return 'unknown';
+  if (activeIncident) {
+    if (latestCheck.status === 'offline' || latestCheck.status === 'critical') return latestCheck.status;
+    return 'warning';
+  }
   if (site.monitoring_state === 'down') {
     return latestCheck.status === 'offline' ? 'offline' : 'critical';
   }
@@ -404,12 +409,18 @@ export function createApp(options: CreateAppOptions = {}) {
         const site = entry.site;
         const latest = entry.latest_check;
         const metric = entry.metrics?.['30d'];
+        const responseTimeIsValid = latest
+          && latest.response_time != null
+          && latest.incident_eligible !== true
+          && latest.status !== 'offline'
+          && latest.status !== 'security_blocked'
+          && (latest.http_status != null || latest.status === 'online' || latest.status === 'warning');
         return {
           name: site.name,
           domain: site.domain,
-          status: publicStatusForSite(site, latest),
+          status: publicStatusForSite(site, latest, entry.active_incident),
           lastCheckedAt: latest?.checked_at || site.last_checked_at || null,
-          responseTimeMs: latest?.response_time ?? null,
+          responseTimeMs: responseTimeIsValid ? latest.response_time : null,
           uptime30d: metric?.totalChecks > 0 ? {
             percentage: metric.uptimePercent,
             reliable: Boolean(metric.hasFullWindow),
@@ -798,7 +809,7 @@ export function createApp(options: CreateAppOptions = {}) {
     let query = supabase
       .from('checks')
       .select([
-        'id', 'site_id', 'incident_id', 'checked_at', 'status', 'http_status', 'response_time',
+        'id', 'site_id', 'incident_id', 'incident_eligible', 'checked_at', 'status', 'http_status', 'response_time',
         'final_url', 'error_type', 'error_message', 'observed_ip', 'dns_records', 'ssl',
         'expected_content_found', 'wordpress', 'domain_rdap', 'redirect_count',
         'result_message', 'diagnostics'
@@ -1206,4 +1217,3 @@ export function startServer() {
   });
   return server;
 }
-

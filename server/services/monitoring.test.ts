@@ -250,8 +250,9 @@ describe('requisição fixada ao IP validado', () => {
 });
 
 describe('serviço central de checks', () => {
-  it('ignora URL adulterada quando um siteId foi informado', async () => {
+  it('ignora URL adulterada e não persiste latência de falha como resposta válida', async () => {
     let checkedUrl = '';
+    let persistedResponseTime: number | null | undefined;
     const officialSite = {
       id: 'site-1',
       url: 'https://official.example',
@@ -260,8 +261,9 @@ describe('serviço central de checks', () => {
     };
 
     const fakeSupabase = {
-      async rpc(name: string) {
+      async rpc(name: string, args: Record<string, unknown>) {
         assert.equal(name, 'record_monitoring_result');
+        persistedResponseTime = args.p_response_time as number | null;
         return {
           data: [{ check_id: 'check-1', incident_transition: 'unchanged', related_incident_id: null }],
           error: null
@@ -303,7 +305,7 @@ describe('serviço central de checks', () => {
         supabase: fakeSupabase,
         executeCheck: async (url) => {
           checkedUrl = url;
-          return classifyHttpStatus(200, 5, url);
+          return classifyHttpStatus(500, 5, url);
         },
         now: () => new Date('2026-08-31T12:00:00.000Z')
       }
@@ -312,6 +314,7 @@ describe('serviço central de checks', () => {
     assert.equal(checkedUrl, officialSite.url);
     assert.equal(response.siteId, officialSite.id);
     assert.equal(response.checkId, 'check-1');
+    assert.equal(persistedResponseTime, null);
   });
 });
 
@@ -471,6 +474,28 @@ describe('agendamento por frequência', () => {
     assert.equal(result.acquired, false);
     assert.deepEqual(calls, ['claim_monitoring_run']);
   });
+
+  it('reserva somente sites vencidos usando o instante do ciclo', async () => {
+    const calls: Array<{ name: string; args?: Record<string, unknown> }> = [];
+    const supabase = {
+      async rpc(name: string, args?: Record<string, unknown>) {
+        calls.push({ name, args });
+        if (name === 'claim_monitoring_run') {
+          return { data: [{ run_id: 'run-1', owner_token: 'owner-1' }], error: null };
+        }
+        if (name === 'claim_due_monitoring_sites') return { data: [], error: null };
+        if (name === 'finish_monitoring_run') return { data: true, error: null };
+        return { data: null, error: null };
+      }
+    } as any;
+
+    const result = await runMonitoringCycle(supabase, 5, now);
+    const claim = calls.find((call) => call.name === 'claim_due_monitoring_sites');
+    assert.equal(result.acquired, true);
+    assert.equal(result.claimed, 0);
+    assert.equal(claim?.args?.p_now, new Date(now).toISOString());
+    assert.equal(calls.at(-1)?.name, 'finish_monitoring_run');
+  });
 });
 
 describe('mapeamento sem telemetria fabricada', () => {
@@ -526,5 +551,40 @@ describe('mapeamento sem telemetria fabricada', () => {
     assert.equal(site.checksHistory[0].timestamp, 'Indisponível');
     assert.equal(site.checksHistory[0].httpCode, 'Indisponível');
     assert.equal(site.checksHistory[0].result, 'Sem detalhe disponível');
+  });
+
+  it('usa o último check válido mesmo quando o estado persistido ainda está pending', () => {
+    const check: DbCheck = {
+      id: 'check-online', site_id: dbSite.id, checked_at: '2026-09-01T12:00:00.000Z',
+      status: 'online', http_status: 200, response_time: 120, incident_eligible: false
+    };
+    const site = mapDbSiteToSite({ ...dbSite, monitoring_state: 'pending' }, [check]);
+    assert.equal(site.status, 'online');
+    assert.equal(site.responseTime, 0.12);
+  });
+
+  it('mantém warning durante recuperação enquanto o incidente continua ativo', () => {
+    const check: DbCheck = {
+      id: 'check-recovery', site_id: dbSite.id, checked_at: '2026-09-01T12:00:00.000Z',
+      status: 'online', http_status: 200, response_time: 90, incident_eligible: false
+    };
+    const site = mapDbSiteToSite(
+      { ...dbSite, monitoring_state: 'recovering' },
+      [check],
+      { id: 'incident-1', site_id: dbSite.id, type: 'Site fora do ar', severity: 'critical', title: 'Falha', started_at: '2026-09-01T11:00:00.000Z', status: 'active', created_at: '2026-09-01T11:00:00.000Z' }
+    );
+    assert.equal(site.status, 'warning');
+  });
+
+  it('não exibe a duração de uma falha como tempo de resposta', () => {
+    const check: DbCheck = {
+      id: 'check-failure', site_id: dbSite.id, checked_at: '2026-09-01T12:00:00.000Z',
+      status: 'critical', http_status: 503, response_time: 2400, incident_eligible: true
+    };
+    const site = mapDbSiteToSite({ ...dbSite, monitoring_state: 'down' }, [check]);
+    assert.equal(site.status, 'critical');
+    assert.equal(site.responseTime, null);
+    assert.equal(site.avgResponseTime, null);
+    assert.equal(site.checksHistory[0].responseTime, 0);
   });
 });
