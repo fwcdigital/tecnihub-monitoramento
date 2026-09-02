@@ -16,8 +16,6 @@ import {
   togglePauseSiteInDatabase, 
   checkSiteNow, 
   checkAllSitesNow,
-  resolveIncidentInDatabase,
-  mapDbIncidentToIncident
 } from './services/siteService';
 import { AdminUser, getAdminSession, loginAdmin, logoutAdmin } from './services/authService';
 import { createTechnicalCredential } from './services/credentialService';
@@ -443,25 +441,6 @@ function AdminApp() {
     setIsIncidentModalOpen(true);
   };
 
-  const handleResolveIncident = async (incidentId: string) => {
-    const inc = incidents.find((i) => i.id === incidentId);
-    if (!inc) return;
-    try {
-      const resolvedIncident = await resolveIncidentInDatabase(incidentId);
-      try {
-        await reloadOperationalData();
-      } catch (reloadError) {
-        console.error('Resolução persistida, mas a atualização da tela falhou:', reloadError);
-        setIncidents((previous) => previous.map((incident) => incident.id === incidentId
-          ? mapDbIncidentToIncident(resolvedIncident, sites)
-          : incident));
-      }
-      addToast('success', 'Incidente marcado como resolvido', `Ocorrência de ${inc.client} foi encerrada.`);
-    } catch (err: any) {
-      addToast('error', 'Falha ao resolver incidente', err.message);
-    }
-  };
-
   const handleLogin = async (email: string, password: string) => {
     const user = await loginAdmin(email, password);
     setOperationalDataStatus('loading');
@@ -606,8 +585,8 @@ function AdminApp() {
           {currentTab === 'incidents' && (
             <IncidentsView
               incidents={incidents}
+              sites={sites}
               onSelectIncident={handleSelectIncident}
-              onResolveIncident={handleResolveIncident}
               onRecheckSite={handleCheckSiteNow}
             />
           )}
@@ -656,7 +635,6 @@ function AdminApp() {
           setIsIncidentModalOpen(false);
           setSelectedIncidentDetail(null);
         }}
-        onResolve={handleResolveIncident}
         onRecheckSite={handleCheckSiteNow}
       />
 

@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS public.sites (
   is_wordpress BOOLEAN NOT NULL DEFAULT false,
   is_active BOOLEAN NOT NULL DEFAULT true,
   check_interval TEXT NOT NULL DEFAULT '5min',
+  sla_target_percent NUMERIC(6,3) NOT NULL DEFAULT 99.900 CHECK (sla_target_percent > 0 AND sla_target_percent <= 100),
   monitor_response_time BOOLEAN NOT NULL DEFAULT true,
   monitor_ssl BOOLEAN NOT NULL DEFAULT true,
   monitor_domain BOOLEAN NOT NULL DEFAULT true,
@@ -240,6 +241,7 @@ CREATE INDEX IF NOT EXISTS idx_sites_is_active ON public.sites(is_active);
 CREATE INDEX IF NOT EXISTS idx_sites_client_name ON public.sites(client_name);
 CREATE INDEX IF NOT EXISTS idx_checks_site_id_checked_at ON public.checks(site_id, checked_at DESC);
 CREATE INDEX IF NOT EXISTS idx_incidents_site_id_status ON public.incidents(site_id, status);
+CREATE INDEX IF NOT EXISTS idx_incidents_site_started_at ON public.incidents(site_id, started_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_incidents_one_active_per_site ON public.incidents(site_id) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_sites_due_monitoring ON public.sites(next_check_at) WHERE is_active = true;
 CREATE INDEX IF NOT EXISTS idx_checks_incident_id ON public.checks(incident_id);

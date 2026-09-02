@@ -30,6 +30,7 @@ import {
   resolveEmailDeliveryBatchSize,
   resolveEmailDeliveryConcurrency
 } from './services/alertDeliveryService';
+import { resolveSlaPeriod } from './services/slaService';
 import { createEmailProviderFromEnv, EmailProvider } from './services/emailAlertService';
 import {
   CredentialMetadata,
@@ -220,6 +221,12 @@ async function validateAdministrativeUrl(url: string): Promise<string> {
 }
 
 function buildSitePayload(body: Record<string, any>) {
+  const slaTargetPercent = body.sla_target_percent === undefined
+    ? 99.9
+    : Number(body.sla_target_percent);
+  if (!Number.isFinite(slaTargetPercent) || slaTargetPercent <= 0 || slaTargetPercent > 100) {
+    throw new SiteCheckError('A meta de SLA deve ser maior que 0% e no máximo 100%.', 400, 'INVALID_SLA_TARGET');
+  }
   return {
     client_name: String(body.client_name || '').trim(),
     name: String(body.name || '').trim(),
@@ -238,7 +245,8 @@ function buildSitePayload(body: Record<string, any>) {
     expected_google_ads_id: body.expected_google_ads_id ? String(body.expected_google_ads_id).trim() : null,
     expected_meta_pixel_id: body.expected_meta_pixel_id ? String(body.expected_meta_pixel_id).trim() : null,
     uses_search_console: Boolean(body.uses_search_console),
-    uses_rd_station: Boolean(body.uses_rd_station)
+    uses_rd_station: Boolean(body.uses_rd_station),
+    sla_target_percent: Math.round(slaTargetPercent * 1000) / 1000
   };
 }
 
@@ -917,6 +925,44 @@ export function createApp(options: CreateAppOptions = {}) {
     return res.json({ metrics: metricsResult.data || {}, period, series: seriesResult.data || [] });
   });
 
+  app.get('/api/sites/:siteId/sla', async (req, res) => {
+    const supabase = getSupabase();
+    if (!supabase) return sendDatabaseUnavailable(res, isProduction);
+
+    let period;
+    try {
+      period = resolveSlaPeriod(
+        typeof req.query.period === 'string' ? req.query.period : undefined,
+        new Date(options.now ? options.now() : Date.now())
+      );
+    } catch {
+      return res.status(400).json({ error: 'Período de SLA inválido.', code: 'INVALID_SLA_PERIOD' });
+    }
+
+    const incidentLimit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
+    const incidentOffset = Math.max(0, Number(req.query.offset) || 0);
+    const { data, error } = await supabase.rpc('get_site_sla_report', {
+      p_site_id: req.params.siteId,
+      p_period_start: period.start.toISOString(),
+      p_period_end: period.end.toISOString(),
+      p_incident_limit: incidentLimit,
+      p_incident_offset: incidentOffset
+    });
+    if (error) {
+      if (error.code === 'P0002') {
+        return res.status(404).json({ error: 'Site não encontrado.', code: 'SITE_NOT_FOUND' });
+      }
+      if (error.code === '22023') {
+        return res.status(400).json({ error: 'Período de SLA inválido.', code: 'INVALID_SLA_PERIOD' });
+      }
+      return res.status(500).json({ error: 'Falha ao calcular o relatório de SLA.', code: 'SLA_REPORT_FAILED' });
+    }
+    if (!data) {
+      return res.status(500).json({ error: 'O banco não retornou o relatório de SLA.', code: 'SLA_REPORT_EMPTY' });
+    }
+    return res.json({ report: data, period: { key: period.key, label: period.label } });
+  });
+
   app.get('/api/incidents', async (req, res) => {
     const supabase = getSupabase();
     if (!supabase) return sendDatabaseUnavailable(res, isProduction);
@@ -945,31 +991,11 @@ export function createApp(options: CreateAppOptions = {}) {
     });
   });
 
-  app.patch('/api/incidents/:incidentId/resolve', async (req, res) => {
-    const supabase = getSupabase();
-    if (!supabase) return sendDatabaseUnavailable(res, isProduction);
-
-    const { data: active } = await supabase
-      .from('incidents')
-      .select('id, started_at')
-      .eq('id', req.params.incidentId)
-      .eq('status', 'active')
-      .maybeSingle();
-    if (!active) return res.status(404).json({ error: 'Incidente ativo não encontrado.', code: 'ACTIVE_INCIDENT_NOT_FOUND' });
-    const resolvedDate = new Date();
-    const resolvedAt = resolvedDate.toISOString();
-    const durationSeconds = Math.max(0, Math.floor((resolvedDate.getTime() - new Date(active.started_at).getTime()) / 1000));
-    const { data, error } = await supabase
-      .from('incidents')
-      .update({ status: 'resolved', resolved_at: resolvedAt, duration_seconds: durationSeconds })
-      .eq('id', req.params.incidentId)
-      .eq('status', 'active')
-      .select('*')
-      .single();
-    if (error || !data) {
-      return res.status(404).json({ error: 'Incidente ativo não encontrado.', code: 'ACTIVE_INCIDENT_NOT_FOUND' });
-    }
-    return res.json({ incident: data });
+  app.patch('/api/incidents/:incidentId/resolve', async (_req, res) => {
+    return res.status(409).json({
+      error: 'A recuperação é confirmada automaticamente após duas verificações consecutivas bem-sucedidas.',
+      code: 'MANUAL_INCIDENT_RESOLUTION_DISABLED'
+    });
   });
 
   app.get('/api/alerts/config', async (_req, res) => {
@@ -1163,7 +1189,8 @@ export function createApp(options: CreateAppOptions = {}) {
         'client_name', 'name', 'url', 'domain', 'hosting_provider', 'is_wordpress',
         'check_interval', 'monitor_response_time', 'monitor_ssl', 'monitor_domain',
         'expected_content', 'expected_ga4_id', 'expected_gtm_id',
-        'expected_google_ads_id', 'expected_meta_pixel_id', 'uses_search_console', 'uses_rd_station'
+        'expected_google_ads_id', 'expected_meta_pixel_id', 'uses_search_console', 'uses_rd_station',
+        'sla_target_percent'
       ]);
       const updatePayload: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(req.body || {})) {
@@ -1181,6 +1208,16 @@ export function createApp(options: CreateAppOptions = {}) {
           error: 'Intervalo de verificação inválido.',
           code: 'INVALID_CHECK_INTERVAL'
         });
+      }
+      if ('sla_target_percent' in updatePayload) {
+        const slaTarget = Number(updatePayload.sla_target_percent);
+        if (!Number.isFinite(slaTarget) || slaTarget <= 0 || slaTarget > 100) {
+          return res.status(400).json({
+            error: 'A meta de SLA deve ser maior que 0% e no máximo 100%.',
+            code: 'INVALID_SLA_TARGET'
+          });
+        }
+        updatePayload.sla_target_percent = Math.round(slaTarget * 1000) / 1000;
       }
       if ('check_interval' in updatePayload) updatePayload.next_check_at = new Date().toISOString();
       if (!Object.keys(updatePayload).length) {

@@ -10,6 +10,7 @@ const webhookSql = readMigration('20260901_004_alert_webhooks.sql');
 const vaultSql = readMigration('20260901_005_technical_credentials_vault.sql');
 const alertsSql = readMigration('20260902_006_transactional_alert_outbox_email.sql');
 const deleteSiteSql = readMigration('20260902_007_delete_site_permanently.sql');
+const slaSql = readMigration('20260902_008_site_sla_reporting.sql');
 
 describe('contratos das migrations finais', () => {
   it('mantém migrations numeradas e ordenáveis sem reaplicar schema.sql', () => {
@@ -21,7 +22,8 @@ describe('contratos das migrations finais', () => {
       '20260901_004_alert_webhooks.sql',
       '20260901_005_technical_credentials_vault.sql',
       '20260902_006_transactional_alert_outbox_email.sql',
-      '20260902_007_delete_site_permanently.sql'
+      '20260902_007_delete_site_permanently.sql',
+      '20260902_008_site_sla_reporting.sql'
     ]);
     assert.equal(files.includes('schema.sql'), false);
   });
@@ -91,6 +93,8 @@ describe('contratos das migrations finais', () => {
     assert.match(alertsSql, /'incident:' \|\| v_active_incident[\s\S]+':confirmed'[\s\S]+':recovery'/i);
     assert.match(alertsSql, /'incidentDurationSeconds', v_duration_seconds/i);
     assert.match(alertsSql, /'clientName', v_site\.client_name/i);
+    assert.match(alertsSql, /SELECT count\(\*\) = 3[\s\S]+min\(checked_at\)[\s\S]+ORDER BY checked_at DESC, id DESC[\s\S]+LIMIT 3/i);
+    assert.match(alertsSql, /COALESCE\(v_started_at, p_checked_at\)[\s\S]+'active'[\s\S]+3/i);
   });
 
   it('claims de eventos e entregas são atômicos, recuperáveis e idempotentes', () => {
@@ -151,5 +155,48 @@ describe('contratos das migrations finais', () => {
       'technical_credentials', 'credential_audit_log'
     ]) assert.match(deleteSiteSql, new RegExp(`public\\.${table}`, 'i'));
     assert.doesNotMatch(deleteSiteSql, /DELETE FROM public\.(alert_webhooks|alert_email_configs|domain_rdap_cache|monitoring_runs|monitoring_scheduler_locks)/i);
+  });
+
+  it('adiciona meta de SLA por site sem alterar o motor de incidentes', () => {
+    assert.match(slaSql, /ADD COLUMN sla_target_percent NUMERIC\(6,3\) NOT NULL DEFAULT 99\.900/i);
+    assert.match(slaSql, /CHECK \(sla_target_percent > 0 AND sla_target_percent <= 100\)/i);
+    assert.doesNotMatch(slaSql, /CREATE OR REPLACE FUNCTION public\.record_monitoring_result/i);
+    assert.doesNotMatch(slaSql, /UPDATE public\.incidents/i);
+    assert.doesNotMatch(slaSql, /INSERT INTO public\.(checks|incidents)/i);
+  });
+
+  it('calcula SLA somente pelos intervalos de incidentes confirmados', () => {
+    assert.match(slaSql, /CREATE OR REPLACE FUNCTION public\.get_site_sla_report/i);
+    assert.match(slaSql, /FROM public\.incidents incident[\s\S]+incident\.started_at < v_observed_end[\s\S]+COALESCE\(incident\.resolved_at, v_observed_end\) > v_observed_start/i);
+    assert.match(slaSql, /greatest\(incident\.started_at, v_observed_start\) AS overlap_start/i);
+    assert.match(slaSql, /least\(COALESCE\(incident\.resolved_at, v_observed_end\), v_observed_end\) AS overlap_end/i);
+    assert.match(slaSql, /max\(overlap_end\) OVER[\s\S]+ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING/i);
+    assert.match(slaSql, /GROUP BY overlap_group/i);
+    assert.match(slaSql, /sum\(extract\(epoch FROM \(overlap_end - overlap_start\)\)\)/i);
+    assert.match(slaSql, /100 \* \(v_period_seconds - v_downtime_seconds\) \/ v_period_seconds/i);
+    assert.match(slaSql, /v_period_seconds \* \(100 - v_site\.sla_target_percent\) \/ 100/i);
+    assert.match(slaSql, /check_row\.status <> 'security_blocked'/i);
+    assert.doesNotMatch(slaSql, /http_status\s+(?:NOT\s+)?IN/i);
+  });
+
+  it('exige cobertura contínua próxima às bordas e sem gaps anormais', () => {
+    assert.match(slaSql, /public\.monitor_interval_value\(v_site\.check_interval\)/i);
+    assert.match(slaSql, /greatest\([\s\S]+v_expected_interval \* 2[\s\S]+v_expected_interval \+ interval '5 minutes'/i);
+    assert.match(slaSql, /p_period_start - v_check_before_start <= v_gap_tolerance/i);
+    assert.match(slaSql, /p_period_end - v_last_check_in_period <= v_gap_tolerance/i);
+    assert.match(slaSql, /lag\(check_row\.checked_at\) OVER/i);
+    assert.match(slaSql, /checked_at - previous_checked_at > v_gap_tolerance/i);
+    assert.match(slaSql, /v_has_full_coverage := v_has_continuous_coverage[\s\S]+v_start_covered[\s\S]+v_end_covered/i);
+    assert.doesNotMatch(slaSql, /v_site\.is_active/i);
+    assert.match(slaSql, /'observedEnd', v_observed_end/i);
+    assert.match(slaSql, /'abnormalGapCount', v_abnormal_gap_count/i);
+  });
+
+  it('protege e limita a RPC de SLA para uso exclusivo do backend', () => {
+    assert.match(slaSql, /SECURITY DEFINER[\s\S]+SET search_path = pg_catalog, pg_temp/i);
+    assert.match(slaSql, /p_period_end - p_period_start > interval '366 days'/i);
+    assert.match(slaSql, /LIMIT v_limit OFFSET v_offset/i);
+    assert.match(slaSql, /REVOKE ALL ON FUNCTION public\.get_site_sla_report[\s\S]+FROM PUBLIC, anon, authenticated/i);
+    assert.match(slaSql, /GRANT EXECUTE ON FUNCTION public\.get_site_sla_report[\s\S]+TO service_role/i);
   });
 });

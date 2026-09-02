@@ -30,6 +30,7 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
   const [domain, setDomain] = useState('');
   const [hosting, setHosting] = useState<HostingProvider>('Hostinger');
   const [frequency, setFrequency] = useState<MonitoringFrequency>('5min');
+  const [slaTargetPercent, setSlaTargetPercent] = useState(99.9);
   const [isWordPress, setIsWordPress] = useState(false);
   
   // Toggles
@@ -77,6 +78,7 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
       setHosting(siteToEdit.hosting);
       setIsWordPress(Boolean(siteToEdit.isWordPress));
       setFrequency(siteToEdit.frequency);
+      setSlaTargetPercent(siteToEdit.slaTargetPercent ?? 99.9);
       setMonitorAvailability(siteToEdit.monitorAvailability);
       setMonitorResponseTime(siteToEdit.monitorResponseTime);
       setMonitorSsl(siteToEdit.monitorSsl);
@@ -113,6 +115,7 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
       setHosting('Hostinger');
       setIsWordPress(false);
       setFrequency('5min');
+      setSlaTargetPercent(99.9);
       setMonitorAvailability(true);
       setMonitorResponseTime(true);
       setMonitorSsl(true);
@@ -228,6 +231,7 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
       hosting,
       isWordPress,
       frequency,
+      slaTargetPercent,
       monitorAvailability,
       monitorResponseTime,
       monitorSsl,
@@ -407,6 +411,24 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
                   <option value="1hour">A cada 1 hora</option>
                   <option value="daily">Diariamente</option>
                 </select>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-medium text-neutral-300 mb-1 font-mono">
+                  Meta de SLA
+                </label>
+                <select
+                  value={slaTargetPercent}
+                  onChange={(event) => setSlaTargetPercent(Number(event.target.value))}
+                  className="w-full px-2.5 py-1.5 bg-[#000000] border border-[#222222] rounded text-xs text-white focus:outline-none focus:border-neutral-500 font-mono"
+                >
+                  <option value={99}>99%</option>
+                  <option value={99.5}>99,5%</option>
+                  <option value={99.9}>99,9% (Padrão)</option>
+                  <option value={99.95}>99,95%</option>
+                  <option value={99.99}>99,99%</option>
+                </select>
+                <p className="mt-1 text-[9px] text-neutral-500">Usada nos relatórios de disponibilidade por incidente confirmado.</p>
               </div>
             </div>
           </div>

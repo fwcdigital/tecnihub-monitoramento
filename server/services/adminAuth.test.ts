@@ -216,6 +216,15 @@ describe('autenticação administrativa', () => {
     assert.equal(payload.user.email, activeAdmin.email);
   });
 
+  it('não permite resolver incidente fora da regra automática de dois sucessos', async () => {
+    const baseUrl = await startTestServer();
+    const response = await fetchAsAdmin(baseUrl, '/api/incidents/incident-1/resolve', {
+      method: 'PATCH', body: JSON.stringify({})
+    });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).code, 'MANUAL_INCIDENT_RESOLUTION_DISABLED');
+  });
+
   it('limpa a sessão no logout', async () => {
     const baseUrl = await startTestServer();
     const loginResponse = await login(baseUrl);
@@ -300,6 +309,7 @@ describe('CRUD administrativo de sites e preservação de histórico', () => {
     assert.equal(inserted?.check_interval, '15min');
     assert.equal(inserted?.expected_content, 'Conteúdo esperado');
     assert.equal(inserted?.monitoring_state, 'pending');
+    assert.equal(inserted?.sla_target_percent, 99.9);
     assert.equal(typeof inserted?.next_check_at, 'string');
   });
 
@@ -343,7 +353,7 @@ describe('CRUD administrativo de sites e preservação de histórico', () => {
       method: 'PATCH',
       body: JSON.stringify({
         name: 'Portal atualizado', url: 'https://93.184.216.34/novo',
-        check_interval: '30min', expected_content: 'Nova marca'
+        check_interval: '30min', expected_content: 'Nova marca', sla_target_percent: 99.95
       })
     });
     assert.equal(response.status, 200);
@@ -351,6 +361,7 @@ describe('CRUD administrativo de sites e preservação de histórico', () => {
     assert.equal(updated?.url, 'https://93.184.216.34/novo');
     assert.equal(updated?.check_interval, '30min');
     assert.equal(updated?.expected_content, 'Nova marca');
+    assert.equal(updated?.sla_target_percent, 99.95);
     assert.equal(typeof updated?.next_check_at, 'string');
   });
 
@@ -943,6 +954,51 @@ describe('hardening HTTP e configuração de produção', () => {
     assert.equal(payload.period, '30d');
     assert.equal(payload.series.length, 1);
     assert.equal(payload.metrics['90d'].uptimePercent, null);
+  });
+
+  it('calcula relatório de SLA no banco com período resolvido e paginação limitada', async () => {
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const report = {
+      site: { id: 'site-1', slaTargetPercent: 99.9 },
+      period: { hasData: true, hasFullCoverage: true },
+      summary: { availabilityPercent: 99.97, slaStatus: 'within_sla' },
+      incidents: [], pagination: { total: 0, hasMore: false }, formulaVersion: 1
+    };
+    const baseUrl = await startTestServer({
+      now: () => Date.parse('2026-09-15T15:30:00.000Z'),
+      getSupabase: () => ({
+        async rpc(name: string, args: Record<string, unknown>) {
+          calls.push({ name, args });
+          return { data: report, error: null };
+        }
+      } as any)
+    });
+    const response = await fetchAsAdmin(baseUrl, '/api/sites/site-1/sla?period=24h&limit=500&offset=50');
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.deepEqual(payload.report, report);
+    assert.equal(payload.period.label, 'Últimas 24 horas');
+    assert.deepEqual(calls, [{
+      name: 'get_site_sla_report',
+      args: {
+        p_site_id: 'site-1',
+        p_period_start: '2026-09-14T15:30:00.000Z',
+        p_period_end: '2026-09-15T15:30:00.000Z',
+        p_incident_limit: 100,
+        p_incident_offset: 50
+      }
+    }]);
+  });
+
+  it('rejeita período de SLA inválido sem consultar o banco', async () => {
+    let rpcCalled = false;
+    const baseUrl = await startTestServer({
+      getSupabase: () => ({ rpc: async () => { rpcCalled = true; return { data: null, error: null }; } } as any)
+    });
+    const response = await fetchAsAdmin(baseUrl, '/api/sites/site-1/sla?period=year');
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).code, 'INVALID_SLA_PERIOD');
+    assert.equal(rpcCalled, false);
   });
 
   it('aplica rate limit razoável ao status público', async () => {

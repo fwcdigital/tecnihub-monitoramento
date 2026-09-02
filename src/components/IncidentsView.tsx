@@ -7,24 +7,24 @@ import {
   Filter, 
   Search, 
   ArrowUpRight, 
-  Check, 
   Layers,
   RefreshCw,
   SlidersHorizontal
 } from 'lucide-react';
-import { Incident, IncidentType, IncidentSeverity } from '../types';
+import { Incident, IncidentType, IncidentSeverity, Site } from '../types';
+import { SlaOverview } from './SlaOverview';
 
 interface IncidentsViewProps {
   incidents: Incident[];
+  sites: Site[];
   onSelectIncident: (incident: Incident) => void;
-  onResolveIncident: (incidentId: string) => void;
   onRecheckSite: (siteId: string) => void;
 }
 
 export const IncidentsView: React.FC<IncidentsViewProps> = ({
   incidents,
+  sites,
   onSelectIncident,
-  onResolveIncident,
   onRecheckSite
 }) => {
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'resolved'>('all');
@@ -100,6 +100,8 @@ export const IncidentsView: React.FC<IncidentsViewProps> = ({
           </div>
         </div>
       </div>
+
+      <SlaOverview sites={sites} onRecheckSite={onRecheckSite} />
 
       {/* Filter Toolbar */}
       <div className="p-3 rounded bg-[#0a0a0a] border border-[#1e1e1e] flex flex-col md:flex-row items-stretch md:items-center justify-between gap-2.5">
@@ -253,20 +255,6 @@ export const IncidentsView: React.FC<IncidentsViewProps> = ({
                       </div>
 
                       <div className="flex items-center gap-1.5">
-                        {!isResolved && (
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              onResolveIncident(incident.id);
-                            }}
-                            className="px-2.5 py-1 rounded bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/30 text-xs font-medium flex items-center gap-1 transition-colors"
-                            title="Marcar como resolvido"
-                          >
-                            <Check className="w-3 h-3" />
-                            Resolver
-                          </button>
-                        )}
-
                         <button
                           onClick={(e) => {
                             e.stopPropagation();

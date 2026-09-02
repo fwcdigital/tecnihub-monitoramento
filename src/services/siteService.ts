@@ -10,6 +10,8 @@ import {
   MonitoringFrequency,
   SiteDeletionImpact,
   SiteDeletionResult,
+  SiteSlaReport,
+  SlaPeriodKey,
   SiteMetrics,
   MonitoringSeriesPoint,
   TrackingToolResult
@@ -170,6 +172,7 @@ export function mapDbSiteToSite(
     domain: dbSite.domain,
     hosting: (dbSite.hosting_provider as HostingProvider) || 'Hostinger',
     frequency: (dbSite.check_interval as MonitoringFrequency) || '5min',
+    slaTargetPercent: Number(dbSite.sla_target_percent ?? 99.9),
     status: currentStatus,
     isWordPress: dbSite.is_wordpress,
     isActive: dbSite.is_active,
@@ -338,14 +341,6 @@ export async function getIncidentsFromDatabase(sites: Site[]): Promise<Incident[
   return incidents.map((incident) => mapDbIncidentToIncident(incident, sites));
 }
 
-export async function resolveIncidentInDatabase(incidentId: string): Promise<DbIncident> {
-  const response = await apiRequest<{ incident: DbIncident }>(`/api/incidents/${encodeURIComponent(incidentId)}/resolve`, {
-    method: 'PATCH',
-    body: JSON.stringify({})
-  });
-  return response.incident;
-}
-
 export async function getSiteChecksPage(
   siteId: string,
   limit = 50,
@@ -459,6 +454,7 @@ function mapSiteToPayload(siteData: Partial<Site>) {
     hosting_provider: siteData.hosting,
     is_wordpress: Boolean(siteData.isWordPress),
     check_interval: siteData.frequency,
+    sla_target_percent: siteData.slaTargetPercent ?? 99.9,
     monitor_response_time: siteData.monitorResponseTime,
     monitor_ssl: siteData.monitorSsl,
     monitor_domain: siteData.monitorDomain,
@@ -514,6 +510,15 @@ export async function deleteSiteFromDatabase(siteId: string, confirmation: strin
     method: 'DELETE',
     body: JSON.stringify({ confirmation })
   });
+}
+
+export async function getSiteSlaReport(
+  siteId: string,
+  period: SlaPeriodKey,
+  offset = 0
+): Promise<{ report: SiteSlaReport; period: { key: SlaPeriodKey; label: string } }> {
+  const query = new URLSearchParams({ period, limit: '50', offset: String(offset) });
+  return apiRequest(`/api/sites/${encodeURIComponent(siteId)}/sla?${query}`);
 }
 
 export async function togglePauseSiteInDatabase(siteId: string, currentIsActive: boolean): Promise<boolean> {

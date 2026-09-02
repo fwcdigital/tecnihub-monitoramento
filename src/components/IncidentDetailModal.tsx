@@ -1,12 +1,11 @@
 import React from 'react';
-import { X, AlertOctagon, AlertTriangle, CheckCircle2, Clock, Globe, Server, ArrowRight, RefreshCw, Check } from 'lucide-react';
+import { X, AlertOctagon, AlertTriangle, CheckCircle2, Clock, Globe, Server, ArrowRight, RefreshCw } from 'lucide-react';
 import { Incident } from '../types';
 
 interface IncidentDetailModalProps {
   incident: Incident | null;
   isOpen: boolean;
   onClose: () => void;
-  onResolve: (incidentId: string) => void;
   onRecheckSite: (siteId: string) => void;
 }
 
@@ -14,7 +13,6 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({
   incident,
   isOpen,
   onClose,
-  onResolve,
   onRecheckSite
 }) => {
   if (!isOpen || !incident) return null;
@@ -196,18 +194,6 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({
             </button>
 
             <div className="flex items-center gap-2">
-              {!isResolved && (
-                <button
-                  onClick={() => {
-                    onResolve(incident.id);
-                    onClose();
-                  }}
-                  className="px-3 py-1.5 text-xs font-semibold bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/40 rounded transition-colors flex items-center gap-1.5 font-mono cursor-pointer"
-                >
-                  <Check className="w-3 h-3" />
-                  Marcar como Resolvido
-                </button>
-              )}
               <button
                 onClick={onClose}
                 className="px-3 py-1.5 text-xs font-medium bg-[#161616] text-white hover:bg-[#222222] border border-[#222222] rounded transition-colors cursor-pointer"

@@ -93,6 +93,7 @@ export interface Site {
   domain: string;
   hosting: HostingProvider;
   frequency: MonitoringFrequency;
+  slaTargetPercent: number;
   status: SiteStatus;
   uptime30d: number | null;
   uptime30dReliable?: boolean;
@@ -163,6 +164,7 @@ export interface DbSite {
   is_wordpress: boolean;
   is_active: boolean;
   check_interval: string;
+  sla_target_percent?: number | string;
   monitor_response_time?: boolean;
   monitor_ssl?: boolean;
   monitor_domain?: boolean;
@@ -180,6 +182,63 @@ export interface DbSite {
   consecutive_failures?: number;
   consecutive_successes?: number;
   monitoring_state?: string;
+}
+
+export type SlaPeriodKey = '24h' | '7d' | '30d' | 'current_month' | 'previous_month';
+
+export interface SlaIncidentHistoryItem {
+  id: string;
+  status: 'active' | 'resolved';
+  severity: IncidentSeverity;
+  humanCause: string;
+  description?: string;
+  technicalCode?: string;
+  startedAt: string;
+  resolvedAt?: string;
+  durationSeconds: number;
+  periodDowntimeSeconds: number;
+  failedChecks?: number;
+}
+
+export interface SiteSlaReport {
+  site: {
+    id: string;
+    clientName: string;
+    name: string;
+    domain: string;
+    slaTargetPercent: number;
+  };
+  period: {
+    start: string;
+    end: string;
+    observedStart?: string | null;
+    observedEnd?: string | null;
+    seconds: number;
+    hasData: boolean;
+    hasContinuousCoverage: boolean;
+    hasFullCoverage: boolean;
+    startCovered: boolean;
+    endCovered: boolean;
+    expectedIntervalSeconds: number;
+    gapToleranceSeconds: number;
+    abnormalGapCount: number;
+    largestGapSeconds: number;
+  };
+  summary: {
+    availabilityPercent: number | null;
+    slaStatus: 'within_sla' | 'below_sla' | 'insufficient_data';
+    incidentCount: number;
+    openIncidents: number;
+    downtimeSeconds: number;
+    allowedDowntimeSeconds: number | null;
+    remainingOrExceededSeconds: number | null;
+    longestIncidentSeconds: number;
+    averageIncidentSeconds: number;
+    mttrSeconds: number | null;
+  };
+  incidents: SlaIncidentHistoryItem[];
+  pagination: { limit: number; offset: number; total: number; hasMore: boolean };
+  formulaVersion: number;
 }
 
 export interface DbCheck {
