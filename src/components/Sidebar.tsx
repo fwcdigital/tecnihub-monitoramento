@@ -250,25 +250,25 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </div>
 
         {/* Agency Account Card */}
-        <div className="px-3 py-2.5 border-t border-[#1e1e1e] bg-[#000000] flex items-center justify-between">
-          <div className="flex items-center gap-2 min-w-0">
-            <div className="w-6 h-6 rounded bg-[#141414] border border-[#2a2a2a] flex items-center justify-center font-bold text-[10px] text-neutral-300 font-mono shrink-0">
+        <div className="min-h-[60px] px-3.5 py-3 border-t border-[#1e1e1e] bg-[#000000] flex items-center gap-3">
+          <div className="flex min-w-0 flex-1 items-center gap-2.5">
+            <div className="w-8 h-8 rounded bg-[#141414] border border-[#2a2a2a] flex shrink-0 items-center justify-center text-[11px] font-semibold text-neutral-300">
               TH
             </div>
-            <div className="truncate">
-              <p className="text-[11px] font-semibold text-neutral-200 truncate">Equipe <span className="font-brand font-normal">Tecnihub</span></p>
-              <p className="text-[9px] text-neutral-500 font-mono truncate">{adminEmail}</p>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-xs font-semibold leading-4 text-neutral-100">Equipe Tecnihub</p>
+              <p className="truncate text-[10px] font-normal leading-4 text-neutral-500">{adminEmail}</p>
             </div>
           </div>
           <button
             type="button"
             onClick={onLogout}
             disabled={isLoggingOut}
-            className="p-1.5 rounded text-neutral-500 hover:text-white hover:bg-[#181818] disabled:opacity-50 transition-colors"
+            className="ml-auto flex h-8 w-8 shrink-0 items-center justify-center rounded text-neutral-500 transition-colors hover:bg-[#181818] hover:text-white disabled:opacity-50"
             title="Sair do painel"
             aria-label="Sair do painel"
           >
-            <LogOut className="w-3.5 h-3.5" />
+            <LogOut className="w-4 h-4" />
           </button>
         </div>
       </aside>

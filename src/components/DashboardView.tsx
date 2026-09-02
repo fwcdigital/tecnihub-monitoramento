@@ -1,4 +1,5 @@
-import React, { useState, useMemo } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { 
   Plus, 
   Search, 
@@ -20,7 +21,9 @@ import {
   Zap,
   Filter,
   Eye,
-  Globe
+  Globe,
+  PanelRightClose,
+  PanelRightOpen
 } from 'lucide-react';
 import { Site, Incident, SiteStatus } from '../types';
 import { domainUnavailableLabel, responseTimeUnavailableLabel, sslUnavailableLabel } from '../utils/diagnosticLabels';
@@ -40,6 +43,138 @@ interface DashboardViewProps {
   checkingSiteId?: string | null;
 }
 
+interface SiteActionsMenuProps {
+  anchor: HTMLButtonElement;
+  site: Site;
+  checkingSiteId: string | null;
+  onClose: () => void;
+  onSelectSite: (site: Site) => void;
+  onEditSite: (site: Site) => void;
+  onTogglePause: (siteId: string) => void;
+  onDeleteSite: (siteId: string) => void;
+  onCheckSiteNow: (siteId: string) => void;
+}
+
+const ACTION_MENU_WIDTH = 176;
+const VIEWPORT_MARGIN = 8;
+const ACTION_MENU_GAP = 4;
+
+const SiteActionsMenu: React.FC<SiteActionsMenuProps> = ({
+  anchor,
+  site,
+  checkingSiteId,
+  onClose,
+  onSelectSite,
+  onEditSite,
+  onTogglePause,
+  onDeleteSite,
+  onCheckSiteNow
+}) => {
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ top: 0, left: 0, ready: false });
+  const isPaused = site.status === 'paused';
+
+  const updatePosition = useCallback(() => {
+    const anchorRect = anchor.getBoundingClientRect();
+    const anchorIsOutsideViewport = anchorRect.bottom < 0
+      || anchorRect.top > window.innerHeight
+      || anchorRect.right < 0
+      || anchorRect.left > window.innerWidth;
+    if (anchorIsOutsideViewport) {
+      setPosition((current) => ({ ...current, ready: false }));
+      return;
+    }
+
+    const menuHeight = menuRef.current?.offsetHeight ?? 208;
+    const availableBelow = window.innerHeight - anchorRect.bottom - ACTION_MENU_GAP - VIEWPORT_MARGIN;
+    const canOpenAbove = anchorRect.top - ACTION_MENU_GAP - VIEWPORT_MARGIN >= menuHeight;
+    const desiredTop = availableBelow < menuHeight && canOpenAbove
+      ? anchorRect.top - menuHeight - ACTION_MENU_GAP
+      : anchorRect.bottom + ACTION_MENU_GAP;
+
+    setPosition({
+      top: Math.min(
+        Math.max(VIEWPORT_MARGIN, desiredTop),
+        Math.max(VIEWPORT_MARGIN, window.innerHeight - menuHeight - VIEWPORT_MARGIN)
+      ),
+      left: Math.min(
+        Math.max(VIEWPORT_MARGIN, anchorRect.right - ACTION_MENU_WIDTH),
+        Math.max(VIEWPORT_MARGIN, window.innerWidth - ACTION_MENU_WIDTH - VIEWPORT_MARGIN)
+      ),
+      ready: true
+    });
+  }, [anchor]);
+
+  useLayoutEffect(() => {
+    updatePosition();
+  }, [updatePosition]);
+
+  useEffect(() => {
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (menuRef.current?.contains(target) || anchor.contains(target)) return;
+      onClose();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        onClose();
+        anchor.focus();
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [anchor, onClose, updatePosition]);
+
+  const runAction = (action: () => void) => {
+    action();
+    onClose();
+  };
+
+  return createPortal(
+    <div
+      ref={menuRef}
+      role="menu"
+      aria-label={`Ações de ${site.siteName}`}
+      className="fixed z-[100] w-44 rounded border border-[#282828] bg-[#0d0d0d] py-1 text-left text-xs shadow-2xl"
+      style={{
+        top: position.top,
+        left: position.left,
+        visibility: position.ready ? 'visible' : 'hidden'
+      }}
+    >
+      <button type="button" role="menuitem" onClick={() => runAction(() => onSelectSite(site))} className="flex w-full items-center gap-2 px-3 py-1.5 text-neutral-200 hover:bg-[#1a1a1a]">
+        <Eye className="h-3.5 w-3.5" /> Ver detalhes
+      </button>
+      <button type="button" role="menuitem" onClick={() => runAction(() => onCheckSiteNow(site.id))} disabled={checkingSiteId === site.id} className="flex w-full items-center gap-2 px-3 py-1.5 text-neutral-200 hover:bg-[#1a1a1a] disabled:opacity-50">
+        <RefreshCw className={`h-3.5 w-3.5 ${checkingSiteId === site.id ? 'animate-spin text-emerald-400' : ''}`} />
+        {checkingSiteId === site.id ? 'Verificando...' : 'Verificar agora'}
+      </button>
+      <button type="button" role="menuitem" onClick={() => runAction(() => onEditSite(site))} className="flex w-full items-center gap-2 px-3 py-1.5 text-neutral-200 hover:bg-[#1a1a1a]">
+        <Edit3 className="h-3.5 w-3.5" /> Editar
+      </button>
+      <button type="button" role="menuitem" onClick={() => runAction(() => onTogglePause(site.id))} className="flex w-full items-center gap-2 px-3 py-1.5 text-neutral-200 hover:bg-[#1a1a1a]">
+        {isPaused ? <PlayCircle className="h-3.5 w-3.5 text-emerald-400" /> : <PauseCircle className="h-3.5 w-3.5 text-amber-400" />}
+        {isPaused ? 'Reativar monitoramento' : 'Desativar monitoramento'}
+      </button>
+      <div className="my-1 border-t border-[#1e1e1e]" />
+      <button type="button" role="menuitem" onClick={() => runAction(() => onDeleteSite(site.id))} className="flex w-full items-center gap-2 px-3 py-1.5 text-rose-400 hover:bg-rose-950/30">
+        <Trash2 className="h-3.5 w-3.5" /> Excluir
+      </button>
+    </div>,
+    document.body
+  );
+};
+
 export const DashboardView: React.FC<DashboardViewProps> = ({
   sites,
   incidents,
@@ -57,6 +192,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'warning' | 'offline'>('all');
   const [activeActionMenuSiteId, setActiveActionMenuSiteId] = useState<string | null>(null);
+  const [activeActionMenuAnchor, setActiveActionMenuAnchor] = useState<HTMLButtonElement | null>(null);
+  const [isIncidentsCollapsed, setIsIncidentsCollapsed] = useState(false);
 
   // Metrics computation
   const totalSites = sites.length;
@@ -120,9 +257,16 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   }, [sites, statusFilter, searchQuery]);
 
   const recentIncidents = incidents.slice(0, 4);
+  const activeActionMenuSite = activeActionMenuSiteId
+    ? filteredAndSortedSites.find((site) => site.id === activeActionMenuSiteId) ?? null
+    : null;
+  const closeActionMenu = useCallback(() => {
+    setActiveActionMenuSiteId(null);
+    setActiveActionMenuAnchor(null);
+  }, []);
 
   return (
-    <div className="space-y-4 sm:space-y-5">
+    <div className="min-w-0 max-w-full space-y-4 sm:space-y-5">
       
       {/* Header Banner */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-1 border-b border-[#1e1e1e]">
@@ -328,10 +472,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       </div>
 
       {/* Main Grid: Sites Monitorados Table (Left/Main) + Incidentes Recentes (Right) */}
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+      <div className={`grid min-w-0 grid-cols-1 gap-4 ${
+        isIncidentsCollapsed
+          ? '2xl:grid-cols-[minmax(0,1fr)_2.75rem]'
+          : '2xl:grid-cols-[minmax(0,1fr)_17rem]'
+      }`}>
         
-        {/* Sites Monitorados (Spans 2 columns on xl) */}
-        <div className="xl:col-span-2 space-y-3">
+        {/* Sites Monitorados: coluna principal flexível */}
+        <div className="min-w-0 space-y-3">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
             <div>
               <h2 className="text-sm font-bold text-white tracking-tight uppercase font-mono">
@@ -343,7 +491,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             </div>
 
             {/* Filter Tabs */}
-            <div className="flex items-center gap-1 p-0.5 rounded bg-[#0a0a0a] border border-[#1e1e1e] text-[11px]">
+            <div className="flex max-w-full items-center gap-1 overflow-x-auto rounded border border-[#1e1e1e] bg-[#0a0a0a] p-0.5 text-[11px] sm:w-auto">
               <button
                 onClick={() => setStatusFilter('all')}
                 className={`px-2.5 py-0.5 rounded font-medium transition-colors ${
@@ -420,9 +568,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </button>
             </div>
           ) : (
-            <div className="rounded border border-[#1e1e1e] bg-[#0a0a0a] overflow-hidden shadow-xs">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs border-collapse">
+            <div className="min-w-0 max-w-full overflow-hidden rounded border border-[#1e1e1e] bg-[#0a0a0a] shadow-xs">
+              <div className="max-w-full overflow-x-auto overscroll-x-contain">
+                <table className="w-full min-w-max border-collapse text-left text-xs">
                   <thead>
                     <tr className="border-b border-[#1e1e1e] bg-[#000000] text-[9px] font-mono uppercase tracking-wider text-neutral-400">
                       <th className="py-2 px-3 font-semibold">Cliente</th>
@@ -448,8 +596,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                       const isOffline = site.status === 'offline';
                       const isCritical = site.status === 'critical';
                       const isWarning = site.status === 'warning' || site.status === 'security_blocked';
-                      const isPaused = site.status === 'paused';
-
                       return (
                         <tr
                           key={site.id}
@@ -559,7 +705,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
                           {/* Ações */}
                           <td 
-                            className="py-2.5 px-2.5 text-right whitespace-nowrap relative"
+                            className="whitespace-nowrap px-2.5 py-2.5 text-right"
                             onClick={(e) => e.stopPropagation()}
                           >
                             <div className="flex items-center justify-end gap-1">
@@ -580,80 +726,23 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                                 <Eye className="w-3 h-3" />
                               </button>
 
-                              <div className="relative">
-                                <button
-                                  onClick={() => setActiveActionMenuSiteId(activeActionMenuSiteId === site.id ? null : site.id)}
-                                  className="p-1 text-neutral-400 hover:text-white rounded hover:bg-[#181818] transition-colors"
-                                >
-                                  <MoreVertical className="w-3 h-3" />
-                                </button>
-
-                                {activeActionMenuSiteId === site.id && (
-                                  <div className="absolute right-0 mt-1 w-44 bg-[#0d0d0d] border border-[#282828] rounded shadow-xl py-1 z-30 text-xs">
-                                    <button
-                                      onClick={() => {
-                                        onSelectSite(site);
-                                        setActiveActionMenuSiteId(null);
-                                      }}
-                                      className="w-full text-left px-3 py-1.5 text-neutral-200 hover:bg-[#1a1a1a] flex items-center gap-2"
-                                    >
-                                      <Eye className="w-3.5 h-3.5" />
-                                      Ver detalhes
-                                    </button>
-                                    <button
-                                      onClick={() => {
-                                        onCheckSiteNow(site.id);
-                                        setActiveActionMenuSiteId(null);
-                                      }}
-                                      disabled={checkingSiteId === site.id}
-                                      className="w-full text-left px-3 py-1.5 text-neutral-200 hover:bg-[#1a1a1a] flex items-center gap-2 disabled:opacity-50"
-                                    >
-                                      <RefreshCw className={`w-3.5 h-3.5 ${checkingSiteId === site.id ? 'animate-spin text-emerald-400' : ''}`} />
-                                      {checkingSiteId === site.id ? 'Verificando...' : 'Verificar agora'}
-                                    </button>
-                                    <button
-                                      onClick={() => {
-                                        onEditSite(site);
-                                        setActiveActionMenuSiteId(null);
-                                      }}
-                                      className="w-full text-left px-3 py-1.5 text-neutral-200 hover:bg-[#1a1a1a] flex items-center gap-2"
-                                    >
-                                      <Edit3 className="w-3.5 h-3.5" />
-                                      Editar
-                                    </button>
-                                    <button
-                                      onClick={() => {
-                                        onTogglePause(site.id);
-                                        setActiveActionMenuSiteId(null);
-                                      }}
-                                      className="w-full text-left px-3 py-1.5 text-neutral-200 hover:bg-[#1a1a1a] flex items-center gap-2"
-                                    >
-                                      {isPaused ? (
-                                        <>
-                                          <PlayCircle className="w-3.5 h-3.5 text-emerald-400" />
-                                          Reativar monitoramento
-                                        </>
-                                      ) : (
-                                        <>
-                                          <PauseCircle className="w-3.5 h-3.5 text-amber-400" />
-                                          Desativar monitoramento
-                                        </>
-                                      )}
-                                    </button>
-                                    <div className="border-t border-[#1e1e1e] my-1"></div>
-                                    <button
-                                      onClick={() => {
-                                        onDeleteSite(site.id);
-                                        setActiveActionMenuSiteId(null);
-                                      }}
-                                      className="w-full text-left px-3 py-1.5 text-rose-400 hover:bg-rose-950/30 flex items-center gap-2"
-                                    >
-                                      <Trash2 className="w-3.5 h-3.5" />
-                                      Excluir
-                                    </button>
-                                  </div>
-                                )}
-                              </div>
+                              <button
+                                type="button"
+                                aria-haspopup="menu"
+                                aria-expanded={activeActionMenuSiteId === site.id}
+                                aria-label={`Abrir ações de ${site.siteName}`}
+                                onClick={(event) => {
+                                  if (activeActionMenuSiteId === site.id) {
+                                    closeActionMenu();
+                                    return;
+                                  }
+                                  setActiveActionMenuSiteId(site.id);
+                                  setActiveActionMenuAnchor(event.currentTarget);
+                                }}
+                                className="rounded p-1 text-neutral-400 transition-colors hover:bg-[#181818] hover:text-white"
+                              >
+                                <MoreVertical className="h-3 w-3" />
+                              </button>
                             </div>
                           </td>
                         </tr>
@@ -667,25 +756,37 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         )}
       </div>
 
-        {/* Incidentes Recentes (Right Column on xl) - High Density Cards */}
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <div>
+        {/* Incidentes Recentes: faixa compacta no desktop e seção abaixo da tabela em telas menores */}
+        <aside className={`min-w-0 ${isIncidentsCollapsed ? '' : 'space-y-3'}`}>
+          <div className={`flex min-w-0 items-start justify-between gap-2 ${isIncidentsCollapsed ? '2xl:justify-center' : ''}`}>
+            <div className={`min-w-0 ${isIncidentsCollapsed ? '2xl:hidden' : ''}`}>
               <h2 className="text-sm font-bold text-white tracking-tight uppercase font-mono">
                 Incidentes recentes
               </h2>
               <p className="text-[11px] text-neutral-400">
                 Eventos e anomalias registradas
               </p>
+              {!isIncidentsCollapsed && (
+                <span className="mt-1.5 inline-flex rounded border border-[#222222] bg-[#161616] px-1.5 py-0.5 font-mono text-[9px] font-semibold text-neutral-400">
+                  Dados persistidos
+                </span>
+              )}
             </div>
-            <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-[#161616] text-neutral-400 font-semibold border border-[#222222]">
-              Dados persistidos
-            </span>
+            <button
+              type="button"
+              onClick={() => setIsIncidentsCollapsed((current) => !current)}
+              aria-expanded={!isIncidentsCollapsed}
+              aria-label={isIncidentsCollapsed ? 'Expandir incidentes recentes' : 'Recolher incidentes recentes'}
+              title={isIncidentsCollapsed ? 'Expandir incidentes recentes' : 'Recolher incidentes recentes'}
+              className="shrink-0 rounded border border-[#222222] bg-[#0a0a0a] p-1.5 text-neutral-400 transition-colors hover:border-neutral-600 hover:text-white"
+            >
+              {isIncidentsCollapsed ? <PanelRightOpen className="h-3.5 w-3.5" /> : <PanelRightClose className="h-3.5 w-3.5" />}
+            </button>
           </div>
 
-          <div className="space-y-2">
+          {!isIncidentsCollapsed && <div className="space-y-2">
             {recentIncidents.length === 0 && (
-              <div className="p-5 rounded border border-[#1e1e1e] bg-[#0a0a0a] text-center text-[11px] font-mono text-neutral-500">
+              <div className="rounded border border-[#1e1e1e] bg-[#0a0a0a] p-4 text-center font-mono text-[11px] text-neutral-500">
                 Sem incidentes registrados.
               </div>
             )}
@@ -697,7 +798,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <div
                   key={incident.id}
                   onClick={() => onSelectIncident(incident)}
-                  className={`p-3 rounded border transition-all cursor-pointer group ${
+                  className={`group cursor-pointer rounded border p-2.5 transition-all ${
                     isCrit && !isResolved
                       ? 'bg-rose-950/20 border-rose-900/50 hover:border-rose-700/60'
                       : isResolved
@@ -705,12 +806,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                       : 'bg-amber-950/15 border-amber-900/50 hover:border-amber-700/60'
                   }`}
                 >
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
+                  <div className="flex min-w-0 items-start justify-between gap-2">
+                    <div className="min-w-0">
                       <span className="text-[9px] font-mono uppercase font-bold text-neutral-400">
                         {incident.client}
                       </span>
-                      <h4 className="text-xs font-semibold text-white group-hover:text-white transition-colors mt-0.5">
+                      <h4 className="mt-0.5 line-clamp-2 text-xs font-semibold leading-4 text-white transition-colors group-hover:text-white">
                         {incident.type}
                       </h4>
                     </div>
@@ -726,26 +827,40 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     </span>
                   </div>
 
-                  <p className="text-[11px] text-neutral-300 mt-1.5 font-mono line-clamp-2">
+                  <p className="mt-1 line-clamp-2 font-mono text-[11px] leading-4 text-neutral-300">
                     {incident.currentStatus}
                   </p>
 
-                  <div className="mt-2 pt-1.5 border-t border-[#181818] flex items-center justify-between text-[9px] font-mono text-neutral-500">
-                    <span className="flex items-center gap-1">
-                      <Clock className="w-2.5 h-2.5" />
+                  <div className="mt-1.5 flex items-center justify-between gap-2 border-t border-[#181818] pt-1.5 font-mono text-[9px] text-neutral-500">
+                    <span className="flex min-w-0 items-center gap-1">
+                      <Clock className="h-2.5 w-2.5 shrink-0" />
                       {incident.createdAt}
                     </span>
-                    <span className="text-neutral-400 group-hover:text-white transition-colors flex items-center gap-1">
+                    <span className="flex shrink-0 items-center gap-1 text-neutral-400 transition-colors group-hover:text-white">
                       Ver detalhes
-                      <ArrowUpRight className="w-2.5 h-2.5" />
+                      <ArrowUpRight className="h-2.5 w-2.5" />
                     </span>
                   </div>
                 </div>
               );
             })}
-          </div>
-        </div>
+          </div>}
+        </aside>
       </div>
+
+      {activeActionMenuSite && activeActionMenuAnchor && (
+        <SiteActionsMenu
+          anchor={activeActionMenuAnchor}
+          site={activeActionMenuSite}
+          checkingSiteId={checkingSiteId}
+          onClose={closeActionMenu}
+          onSelectSite={onSelectSite}
+          onEditSite={onEditSite}
+          onTogglePause={onTogglePause}
+          onDeleteSite={onDeleteSite}
+          onCheckSiteNow={onCheckSiteNow}
+        />
+      )}
     </div>
   );
 };
