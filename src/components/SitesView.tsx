@@ -316,7 +316,7 @@ export const SitesView: React.FC<SitesViewProps> = ({
             Inventário de Sites
           </h1>
           <p className="text-xs text-neutral-400 mt-0.5">
-            Gestão completa de todos os domínios e serviços dos clientes da <span className="font-brand">TECNIHUB</span> ({sites.length} cadastrados).
+            Gestão completa de todos os domínios e serviços dos clientes da TECNIHUB ({sites.length} cadastrados).
           </p>
         </div>
 
