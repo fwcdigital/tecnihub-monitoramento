@@ -30,13 +30,22 @@ Configurar, sem prefixo `VITE_`:
 - `ALLOWED_ORIGINS`
 - `TRUST_PROXY`
 - `MONITOR_CRON_SECRET`
+- `ALERT_CRON_SECRET` (valor exclusivo, diferente de `MONITOR_CRON_SECRET`)
 - `CREDENTIALS_ENCRYPTION_KEY`
 - `CREDENTIALS_MASTER_PASSWORD_HASH`
 - `MONITOR_CRON_BATCH_SIZE` (padrão 5)
 - `MONITOR_CRON_CONCURRENCY` (padrão 5)
+- `EMAIL_PROVIDER=resend`
+- `RESEND_API_KEY`
+- `EMAIL_FROM_ADDRESS`
+- `EMAIL_REPLY_TO` (opcional)
+- `MONITOR_PUBLIC_URL`
+- `EMAIL_REQUEST_TIMEOUT_MS` (padrão 6000)
+- `EMAIL_DELIVERY_BATCH_SIZE` (padrão 5)
+- `EMAIL_DELIVERY_CONCURRENCY` (padrão 2)
 
-Não há variável de e-mail: SMTP/provedor não foi implementado. O webhook é
-configurado pela área administrativa depois que a migration 004 estiver aplicada.
+As credenciais do Resend existem somente no ambiente do backend. Destinatários e
+eventos são configurados pela área administrativa depois da migration 006.
 
 ## 3. Cron externo
 
@@ -61,7 +70,27 @@ execução possui o lease e não é falha. Nunca coloque o valor real do segredo
 Cada chamada processa no máximo `MONITOR_CRON_BATCH_SIZE` sites. A continuidade
 depende somente de `next_check_at`, claims persistidos no Supabase e chamadas futuras do cron.
 
-## 4. Cofre
+Configure um segundo cron externo, independente do monitoramento:
+
+- frequência: a cada minuto;
+- método: `POST`;
+- endpoint: `https://<DOMINIO-DO-MONITOR>/api/internal/alerts/run`;
+- autenticação: `Authorization: Bearer <ALERT_CRON_SECRET>`;
+- timeout: 30 segundos.
+
+Esse cron faz fan-out da outbox e processa somente um pequeno lote de webhooks/e-mails.
+Uma indisponibilidade do Resend não aumenta a duração de `/api/internal/monitor/run`.
+
+## 4. Resend e DNS
+
+1. Criar a conta/projeto no Resend.
+2. Adicionar e verificar o subdomínio `alerts.tecnihub.com.br`.
+3. Publicar exatamente os registros SPF e DKIM fornecidos pelo Resend; configurar DMARC após validar a entrega.
+4. Criar uma API key exclusiva de produção e armazená-la somente em `RESEND_API_KEY` na Hostinger.
+5. Confirmar o remetente `TECNIHUB Monitoramento <alertas@alerts.tecnihub.com.br>`.
+6. Após o deploy, salvar destinatários no painel, manter somente os eventos queda/recuperação e usar “Enviar e-mail de teste”.
+
+## 5. Cofre
 
 1. Gere `CREDENTIALS_ENCRYPTION_KEY` de 32 bytes fora do Git.
 2. Execute `npm run vault:setup` e configure somente o hash exibido em
@@ -70,13 +99,13 @@ depende somente de `next_check_at`, claims persistidos no Supabase e chamadas fu
 4. Faça backup testado da chave de criptografia fora do Git, Supabase e frontend.
    Perder a chave pode tornar todas as credenciais irrecuperáveis.
 
-## 5. Banco e publicação
+## 6. Banco e publicação
 
 1. Criar snapshot/backup do Supabase.
 2. Pausar o cron.
-3. Aplicar migrations 001, 002, 003, 004 e 005, nessa ordem.
+3. Aplicar migrations 001, 002, 003, 004, 005 e 006, nessa ordem.
 4. Não executar `schema.sql` inteiro sobre o banco existente.
 5. Publicar o backend com HTTPS e validar health, login, CRUD, check, histórico,
    métricas, página pública, alertas e cofre.
-6. Ativar e observar o cron.
+6. Ativar e observar os dois crons.
 7. Confirmar que `anon`/`authenticated` não acessam tabelas internas.

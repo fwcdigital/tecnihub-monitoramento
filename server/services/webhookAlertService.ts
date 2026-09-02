@@ -3,17 +3,9 @@ import https from 'node:https';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CheckExecutionResult } from './httpChecker';
 import type { ProcessedSiteCheck, SiteRecordForCheck } from './siteCheckService';
-import { mapWithConcurrency } from './concurrency';
 import { normalizeHttpUrl, validateUrlForSSRF } from './ssrfProtection';
 
 export type AlertEventType = 'incident_confirmed' | 'recovery' | 'ssl_expiring' | 'dns_changed';
-
-interface WebhookRow {
-  id: string;
-  url: string;
-  timeout_ms: number;
-  event_types: AlertEventType[];
-}
 
 async function previousObservedIp(supabase: SupabaseClient, siteId: string, checkId: string): Promise<string | null> {
   const { data } = await supabase
@@ -33,8 +25,8 @@ export function buildEvents(
 ): Array<{ type: AlertEventType; key: string; payload: Record<string, unknown> }> {
   const events: Array<{ type: AlertEventType; key: string; payload: Record<string, unknown> }> = [];
   const base = {
-    eventVersion: 1,
-    site: { name: site.name, domain: site.domain, url: site.url },
+    eventVersion: 2,
+    site: { clientName: site.client_name, name: site.name, domain: site.domain, url: site.url },
     checkedAt: check.checkedAt,
     status: check.result.status,
     httpStatus: check.result.httpStatus,
@@ -44,14 +36,25 @@ export function buildEvents(
     events.push({
       type: 'incident_confirmed',
       key: `incident:${check.incidentId}:confirmed`,
-      payload: { ...base, event: 'incident_confirmed', incidentId: check.incidentId, reason: check.result.errorType }
+      payload: {
+        ...base,
+        event: 'incident_confirmed',
+        incidentId: check.incidentId,
+        confirmedAt: check.checkedAt,
+        reason: {
+          human: check.result.resultMessage,
+          technicalCode: check.result.errorType,
+          technicalMessage: check.result.errorMessage,
+          httpStatus: check.result.httpStatus
+        }
+      }
     });
   }
   if (check.incidentId && check.incidentTransition === 'resolved') {
     events.push({
       type: 'recovery',
       key: `incident:${check.incidentId}:recovery`,
-      payload: { ...base, event: 'recovery', incidentId: check.incidentId }
+      payload: { ...base, event: 'recovery', incidentId: check.incidentId, recoveredAt: check.checkedAt }
     });
   }
   if (check.result.ssl?.applicable && ['warning', 'critical'].includes(check.result.ssl.severity)) {
@@ -80,30 +83,22 @@ export async function queueMonitoringAlerts(
   const priorIp = await previousObservedIp(supabase, site.id, check.checkId);
   const events = buildEvents(site, check, priorIp);
   if (!events.length) return 0;
-  const { data: webhooks, error } = await supabase
-    .from('alert_webhooks')
-    .select('id, url, timeout_ms, event_types')
-    .eq('enabled', true);
-  if (error) return 0;
-  const rows = (webhooks || []).flatMap((webhook: WebhookRow) => events
-    .filter((event) => webhook.event_types.includes(event.type))
-    .map((event) => ({
-      webhook_id: webhook.id,
-      site_id: site.id,
-      incident_id: check.incidentId || null,
-      check_id: check.checkId,
-      event_type: event.type,
-      event_key: event.key,
-      payload: event.payload
-    })));
+  const rows = events.map((event) => ({
+    event_key: event.key,
+    site_id: site.id,
+    incident_id: check.incidentId || null,
+    check_id: check.checkId,
+    event_type: event.type,
+    payload: event.payload
+  }));
   if (!rows.length) return 0;
   const { error: insertError } = await supabase
-    .from('alert_deliveries')
-    .upsert(rows, { onConflict: 'webhook_id,event_key', ignoreDuplicates: true });
+    .from('monitoring_alert_events')
+    .upsert(rows, { onConflict: 'event_key', ignoreDuplicates: true });
   return insertError ? 0 : rows.length;
 }
 
-async function postPinnedJson(urlString: string, payload: unknown, timeoutMs: number): Promise<number> {
+export async function postPinnedJson(urlString: string, payload: unknown, timeoutMs: number): Promise<number> {
   const normalized = normalizeHttpUrl(urlString);
   const validation = await validateUrlForSSRF(normalized);
   if (!validation.valid || !validation.resolvedAddresses?.length) {
@@ -145,61 +140,6 @@ async function postPinnedJson(urlString: string, payload: unknown, timeoutMs: nu
     request.on('error', reject);
     request.end(body);
   });
-}
-
-export async function processPendingWebhookDeliveries(
-  supabase: SupabaseClient,
-  limit = 20,
-  concurrency = 5
-): Promise<{ delivered: number; failed: number }> {
-  const { data: pending, error } = await supabase
-    .from('alert_deliveries')
-    .select('id, webhook_id, payload, alert_webhooks(url, timeout_ms)')
-    .eq('status', 'pending')
-    .order('created_at', { ascending: true })
-    .limit(Math.max(1, Math.min(limit, 100)));
-  if (error) return { delivered: 0, failed: 0 };
-  const candidates = pending || [];
-  const outcomes = await mapWithConcurrency(
-    candidates,
-    Math.max(1, Math.min(concurrency, 5)),
-    async (candidate): Promise<'delivered' | 'failed' | 'skipped'> => {
-      const { data: claimed } = await supabase
-        .from('alert_deliveries')
-        .update({ status: 'processing', attempted_at: new Date().toISOString() })
-        .eq('id', candidate.id)
-        .eq('status', 'pending')
-        .select('id')
-        .maybeSingle();
-      if (!claimed) return 'skipped';
-      const webhook = Array.isArray((candidate as any).alert_webhooks)
-        ? (candidate as any).alert_webhooks[0]
-        : (candidate as any).alert_webhooks;
-      try {
-        const responseStatus = await postPinnedJson(webhook.url, candidate.payload, webhook.timeout_ms);
-        const success = responseStatus >= 200 && responseStatus <= 299;
-        await supabase.from('alert_deliveries').update({
-          status: success ? 'delivered' : 'failed',
-          attempt_count: 1,
-          response_status: responseStatus,
-          error_message: success ? null : `Webhook respondeu HTTP ${responseStatus}.`,
-          delivered_at: success ? new Date().toISOString() : null
-        }).eq('id', candidate.id);
-        return success ? 'delivered' : 'failed';
-      } catch (deliveryError) {
-        await supabase.from('alert_deliveries').update({
-          status: 'failed',
-          attempt_count: 1,
-          error_message: deliveryError instanceof Error ? deliveryError.message.slice(0, 1000) : 'Falha inesperada.'
-        }).eq('id', candidate.id);
-        return 'failed';
-      }
-    }
-  );
-  return {
-    delivered: outcomes.filter((outcome) => outcome === 'delivered').length,
-    failed: outcomes.filter((outcome) => outcome === 'failed').length
-  };
 }
 
 export function alertSummaryFromResult(result: CheckExecutionResult): Record<string, unknown> {

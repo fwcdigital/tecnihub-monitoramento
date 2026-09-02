@@ -135,23 +135,64 @@ CREATE TABLE IF NOT EXISTS public.alert_webhooks (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS public.alert_deliveries (
+CREATE TABLE IF NOT EXISTS public.monitoring_alert_events (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  webhook_id UUID NOT NULL REFERENCES public.alert_webhooks(id) ON DELETE RESTRICT,
+  event_key TEXT NOT NULL UNIQUE,
   site_id UUID NOT NULL REFERENCES public.sites(id) ON DELETE RESTRICT,
   incident_id UUID REFERENCES public.incidents(id) ON DELETE SET NULL,
   check_id UUID REFERENCES public.checks(id) ON DELETE SET NULL,
-  event_type TEXT NOT NULL,
+  event_type TEXT NOT NULL CHECK (event_type IN ('incident_confirmed', 'recovery', 'ssl_expiring', 'dns_changed')),
+  payload JSONB NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  claimed_by UUID,
+  claimed_until TIMESTAMPTZ,
+  dispatched_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS public.alert_email_configs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  singleton BOOLEAN NOT NULL DEFAULT true UNIQUE CHECK (singleton),
+  enabled BOOLEAN NOT NULL DEFAULT false,
+  recipients TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+  event_types TEXT[] NOT NULL DEFAULT ARRAY['incident_confirmed', 'recovery']::TEXT[],
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (event_types <@ ARRAY['incident_confirmed', 'recovery']::TEXT[]),
+  CHECK (cardinality(event_types) > 0),
+  CHECK (cardinality(recipients) <= 50),
+  CHECK (NOT enabled OR cardinality(recipients) > 0)
+);
+
+CREATE TABLE IF NOT EXISTS public.alert_deliveries (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  channel TEXT NOT NULL DEFAULT 'webhook' CHECK (channel IN ('webhook', 'email')),
+  webhook_id UUID REFERENCES public.alert_webhooks(id) ON DELETE RESTRICT,
+  email_config_id UUID REFERENCES public.alert_email_configs(id) ON DELETE RESTRICT,
+  recipient TEXT,
+  site_id UUID REFERENCES public.sites(id) ON DELETE RESTRICT,
+  incident_id UUID REFERENCES public.incidents(id) ON DELETE SET NULL,
+  check_id UUID REFERENCES public.checks(id) ON DELETE SET NULL,
+  event_type TEXT NOT NULL CHECK (event_type IN ('incident_confirmed', 'recovery', 'ssl_expiring', 'dns_changed', 'email_test')),
   event_key TEXT NOT NULL,
   payload JSONB NOT NULL,
-  status TEXT NOT NULL DEFAULT 'pending',
-  attempt_count INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'processing', 'delivered', 'failed')),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
   response_status INTEGER,
+  provider_message_id TEXT,
+  last_error_code TEXT,
   error_message TEXT,
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  processing_until TIMESTAMPTZ,
+  claimed_by UUID,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   attempted_at TIMESTAMPTZ,
   delivered_at TIMESTAMPTZ,
-  UNIQUE (webhook_id, event_key)
+  CHECK (
+    (channel = 'webhook' AND webhook_id IS NOT NULL AND email_config_id IS NULL AND recipient IS NULL)
+    OR
+    (channel = 'email' AND webhook_id IS NULL AND email_config_id IS NOT NULL AND recipient IS NOT NULL AND length(btrim(recipient)) > 0)
+  ),
+  CHECK (event_type = 'email_test' OR site_id IS NOT NULL)
 );
 
 CREATE TABLE IF NOT EXISTS public.technical_credentials (
@@ -205,6 +246,11 @@ CREATE INDEX IF NOT EXISTS idx_checks_incident_id ON public.checks(incident_id);
 CREATE INDEX IF NOT EXISTS idx_checks_status_checked_at ON public.checks(status, checked_at DESC);
 CREATE INDEX IF NOT EXISTS idx_monitoring_runs_started_at ON public.monitoring_runs(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_scheduler_locks_locked_until ON public.monitoring_scheduler_locks(locked_until);
+CREATE INDEX IF NOT EXISTS idx_monitoring_alert_events_pending ON public.monitoring_alert_events(created_at) WHERE dispatched_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_alert_deliveries_due ON public.alert_deliveries(next_attempt_at, created_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_alert_deliveries_expired_processing ON public.alert_deliveries(processing_until) WHERE status = 'processing';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_alert_deliveries_webhook_event ON public.alert_deliveries(webhook_id, event_key) WHERE channel = 'webhook';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_alert_deliveries_email_event_recipient ON public.alert_deliveries(email_config_id, event_key, lower(recipient)) WHERE channel = 'email';
 CREATE INDEX IF NOT EXISTS idx_technical_credentials_site_id ON public.technical_credentials(site_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_credential_audit_site_created_at ON public.credential_audit_log(site_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_credential_audit_admin_created_at ON public.credential_audit_log(admin_id, created_at DESC);
@@ -233,6 +279,11 @@ CREATE TRIGGER trigger_technical_credentials_updated_at
   FOR EACH ROW
   EXECUTE FUNCTION public.handle_updated_at();
 
+DROP TRIGGER IF EXISTS trigger_alert_email_configs_updated_at ON public.alert_email_configs;
+CREATE TRIGGER trigger_alert_email_configs_updated_at
+  BEFORE UPDATE ON public.alert_email_configs
+  FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
+
 -- ==============================================================================
 -- HABILITAÇÃO DE ROW LEVEL SECURITY (RLS)
 -- O frontend não acessa estas tabelas diretamente. Toda operação administrativa
@@ -245,6 +296,8 @@ ALTER TABLE public.monitoring_scheduler_locks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.monitoring_runs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.domain_rdap_cache ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.alert_webhooks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.monitoring_alert_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.alert_email_configs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.alert_deliveries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.technical_credentials ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.credential_audit_log ENABLE ROW LEVEL SECURITY;
@@ -257,6 +310,8 @@ REVOKE ALL ON TABLE public.monitoring_scheduler_locks FROM anon, authenticated;
 REVOKE ALL ON TABLE public.monitoring_runs FROM anon, authenticated;
 REVOKE ALL ON TABLE public.domain_rdap_cache FROM anon, authenticated;
 REVOKE ALL ON TABLE public.alert_webhooks FROM anon, authenticated;
+REVOKE ALL ON TABLE public.monitoring_alert_events FROM anon, authenticated;
+REVOKE ALL ON TABLE public.alert_email_configs FROM anon, authenticated;
 REVOKE ALL ON TABLE public.alert_deliveries FROM anon, authenticated;
 REVOKE ALL ON TABLE public.technical_credentials FROM anon, authenticated;
 REVOKE ALL ON TABLE public.credential_audit_log FROM anon, authenticated;
@@ -268,6 +323,8 @@ GRANT ALL ON TABLE public.monitoring_scheduler_locks TO service_role;
 GRANT ALL ON TABLE public.monitoring_runs TO service_role;
 GRANT ALL ON TABLE public.domain_rdap_cache TO service_role;
 GRANT ALL ON TABLE public.alert_webhooks TO service_role;
+GRANT ALL ON TABLE public.monitoring_alert_events TO service_role;
+GRANT ALL ON TABLE public.alert_email_configs TO service_role;
 GRANT ALL ON TABLE public.alert_deliveries TO service_role;
 GRANT ALL ON TABLE public.technical_credentials TO service_role;
 GRANT ALL ON TABLE public.credential_audit_log TO service_role;

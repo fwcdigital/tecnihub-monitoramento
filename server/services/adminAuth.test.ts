@@ -9,6 +9,7 @@ import { LoginRateLimiter } from './loginRateLimiter';
 
 const SESSION_SECRET = 'test-only-session-secret-with-more-than-32-bytes';
 const CRON_SECRET = 'test-only-cron-secret-with-more-than-32-bytes';
+const ALERT_CRON_SECRET = 'test-only-alert-cron-secret-with-more-than-32-bytes';
 const VAULT_KEY = Buffer.alloc(32, 7).toString('base64url');
 const MASTER_PASSWORD_HASH = `scrypt-v1$16384$8$1$${'a'.repeat(22)}$${'b'.repeat(43)}`;
 const activeAdmin: AdminIdentity = {
@@ -461,6 +462,7 @@ describe('hardening HTTP e configuração de produção', () => {
         NODE_ENV: 'production',
         ADMIN_SESSION_SECRET: SESSION_SECRET,
         MONITOR_CRON_SECRET: CRON_SECRET,
+        ALERT_CRON_SECRET,
         CREDENTIALS_ENCRYPTION_KEY: VAULT_KEY,
         CREDENTIALS_MASTER_PASSWORD_HASH: MASTER_PASSWORD_HASH,
         ALLOWED_ORIGINS: '*'
@@ -471,6 +473,7 @@ describe('hardening HTTP e configuração de produção', () => {
       NODE_ENV: 'production',
       ADMIN_SESSION_SECRET: SESSION_SECRET,
       MONITOR_CRON_SECRET: CRON_SECRET,
+      ALERT_CRON_SECRET,
       CREDENTIALS_ENCRYPTION_KEY: VAULT_KEY,
       CREDENTIALS_MASTER_PASSWORD_HASH: MASTER_PASSWORD_HASH,
       ALLOWED_ORIGINS: 'https://monitoramento.tecnihub.com.br',
@@ -480,9 +483,19 @@ describe('hardening HTTP e configuração de produção', () => {
       () => assertSecureProductionConfiguration({
         NODE_ENV: 'production',
         ADMIN_SESSION_SECRET: SESSION_SECRET,
-        MONITOR_CRON_SECRET: 'curto'
+        MONITOR_CRON_SECRET: 'curto',
+        ALERT_CRON_SECRET
       }),
       /MONITOR_CRON_SECRET/
+    );
+    assert.throws(
+      () => assertSecureProductionConfiguration({
+        NODE_ENV: 'production',
+        ADMIN_SESSION_SECRET: SESSION_SECRET,
+        MONITOR_CRON_SECRET: CRON_SECRET,
+        ALERT_CRON_SECRET: 'curto'
+      }),
+      /ALERT_CRON_SECRET/
     );
   });
 
@@ -531,9 +544,13 @@ describe('hardening HTTP e configuração de produção', () => {
           skipped: 0, failed: 0, concurrency: 5
         };
       },
-      processPendingWebhookDeliveries: async () => {
+      processAlertCycle: async () => {
         alertRuns++;
-        return { delivered: 1, failed: 0 };
+        return {
+          runId: 'alerts-run', eventsClaimed: 0, eventsDispatched: 0,
+          deliveriesCreated: 0, claimed: 0, delivered: 0, retried: 0,
+          failed: 0, skipped: 0, concurrency: 2, durationMs: 0
+        };
       }
     });
     let responseSettled = false;
@@ -555,10 +572,148 @@ describe('hardening HTTP e configuração de produção', () => {
     assert.equal(payload.checked, 5);
     assert.equal(payload.batchSize, 5);
     assert.equal(payload.concurrency, 5);
-    assert.equal(payload.alerts.delivered, 1);
+    assert.equal(payload.alertsDeferred, true);
     assert.equal(receivedArguments[0][1], 5);
     assert.equal(receivedArguments[0][4], 5);
-    assert.equal(alertRuns, 1);
+    assert.equal(alertRuns, 0);
+  });
+
+  it('protege o cron de alertas com segredo separado e não expõe o segredo', async () => {
+    let runs = 0;
+    const baseUrl = await startTestServer({
+      alertCronSecret: ALERT_CRON_SECRET,
+      getSupabase: () => ({} as any),
+      processAlertCycle: async () => {
+        runs++;
+        return {
+          runId: 'alerts-run', eventsClaimed: 1, eventsDispatched: 1,
+          deliveriesCreated: 2, claimed: 2, delivered: 1, retried: 1,
+          failed: 0, skipped: 0, concurrency: 2, durationMs: 12
+        };
+      }
+    });
+    assert.equal((await fetch(`${baseUrl}/api/internal/alerts/run`, { method: 'POST' })).status, 401);
+    assert.equal((await fetch(`${baseUrl}/api/internal/alerts/run`, {
+      method: 'POST', headers: { Authorization: 'Bearer segredo-incorreto-com-mais-de-32-bytes' }
+    })).status, 401);
+    const accepted = await fetch(`${baseUrl}/api/internal/alerts/run`, {
+      method: 'POST', headers: { Authorization: `Bearer ${ALERT_CRON_SECRET}` }
+    });
+    const text = await accepted.text();
+    assert.equal(accepted.status, 200);
+    assert.equal(text.includes(ALERT_CRON_SECRET), false);
+    assert.equal(JSON.parse(text).retried, 1);
+    assert.equal(runs, 1);
+  });
+
+  it('cron de monitoramento e cron de alertas podem executar simultaneamente', async () => {
+    let monitorActive = false;
+    let alertsObservedMonitor = false;
+    const baseUrl = await startTestServer({
+      monitorCronSecret: CRON_SECRET,
+      alertCronSecret: ALERT_CRON_SECRET,
+      getSupabase: () => ({
+        from: () => ({ select: () => ({ eq: () => ({ lte: async () => ({ count: 0, error: null }) }) }) })
+      } as any),
+      runMonitoringCycle: async () => {
+        monitorActive = true;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        monitorActive = false;
+        return { acquired: true, runId: 'monitor-run', claimed: 1, checked: 1, skipped: 0, failed: 0, concurrency: 5 };
+      },
+      processAlertCycle: async () => {
+        alertsObservedMonitor = monitorActive;
+        return {
+          runId: 'alerts-run', eventsClaimed: 0, eventsDispatched: 0,
+          deliveriesCreated: 0, claimed: 0, delivered: 0, retried: 0,
+          failed: 0, skipped: 0, concurrency: 2, durationMs: 1
+        };
+      }
+    });
+    const monitorRequest = fetch(`${baseUrl}/api/internal/monitor/run`, {
+      method: 'POST', headers: { Authorization: `Bearer ${CRON_SECRET}` }
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const alertsRequest = fetch(`${baseUrl}/api/internal/alerts/run`, {
+      method: 'POST', headers: { Authorization: `Bearer ${ALERT_CRON_SECRET}` }
+    });
+    const [monitorResponse, alertsResponse] = await Promise.all([monitorRequest, alertsRequest]);
+    assert.equal(monitorResponse.status, 200);
+    assert.equal(alertsResponse.status, 200);
+    assert.equal(alertsObservedMonitor, true);
+  });
+
+  it('e-mail de teste apenas cria deliveries pendentes, sem incidente, check ou chamada ao provedor', async () => {
+    let insertedRows: Array<Record<string, unknown>> = [];
+    let providerCalls = 0;
+    const supabase = {
+      from(table: string) {
+        if (table === 'alert_email_configs') return {
+          select: () => ({ limit: () => ({ maybeSingle: async () => ({
+            data: { id: 'email-config', recipients: ['a@example.com', 'b@example.com'] }, error: null
+          }) }) })
+        };
+        if (table === 'alert_deliveries') return {
+          async insert(rows: Array<Record<string, unknown>>) { insertedRows = rows; return { error: null }; }
+        };
+        throw new Error(`Tabela inesperada: ${table}`);
+      }
+    } as any;
+    const baseUrl = await startTestServer({
+      getSupabase: () => supabase,
+      emailProvider: {
+        name: 'resend', ready: true,
+        async send() { providerCalls++; return { providerMessageId: 'unexpected', responseStatus: 200 }; }
+      }
+    });
+    const response = await fetchAsAdmin(baseUrl, '/api/alerts/email/test', { method: 'POST', body: '{}' });
+    const payload = await response.json();
+    assert.equal(response.status, 202);
+    assert.equal(payload.queued, 2);
+    assert.equal(providerCalls, 0);
+    assert.equal(insertedRows.every((row) => row.event_type === 'email_test' && !('incident_id' in row) && !('check_id' in row)), true);
+  });
+
+  it('configura múltiplos destinatários sem expor credenciais do provedor', async () => {
+    let savedPayload: Record<string, unknown> | null = null;
+    const supabase = {
+      from(table: string) {
+        if (table === 'alert_email_configs') return {
+          select: () => ({ limit: () => ({ maybeSingle: async () => ({ data: null, error: null }) }) }),
+          insert(payload: Record<string, unknown>) {
+            savedPayload = payload;
+            return {
+              select: () => ({ single: async () => ({
+                data: { id: 'email-config', ...payload, created_at: '2026-09-02T12:00:00.000Z', updated_at: '2026-09-02T12:00:00.000Z' },
+                error: null
+              }) })
+            };
+          }
+        };
+        throw new Error(`Tabela inesperada: ${table}`);
+      }
+    } as any;
+    const provider = {
+      name: 'resend', ready: true, apiKey: 'resend-secret-that-must-not-leak',
+      async send() { return { providerMessageId: 'unused', responseStatus: 200 }; }
+    } as any;
+    const baseUrl = await startTestServer({ getSupabase: () => supabase, emailProvider: provider });
+    const response = await fetchAsAdmin(baseUrl, '/api/alerts/email', {
+      method: 'PUT',
+      body: JSON.stringify({
+        enabled: true,
+        recipients: [' Operacao@Example.com ', 'operacao@example.com', 'gestor@example.com'],
+        eventTypes: ['incident_confirmed', 'recovery', 'dns_changed']
+      })
+    });
+    const text = await response.text();
+    const payload = JSON.parse(text);
+    assert.equal(response.status, 200);
+    assert.deepEqual(savedPayload?.recipients, ['operacao@example.com', 'gestor@example.com']);
+    assert.deepEqual(savedPayload?.event_types, ['incident_confirmed', 'recovery']);
+    assert.equal(payload.email.providerReady, true);
+    assert.equal(text.includes('resend-secret-that-must-not-leak'), false);
+    assert.equal('apiKey' in payload.email, false);
   });
 
   it('verificar todos somente persiste a fila e responde 202 sem executar checks', async () => {

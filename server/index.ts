@@ -2,7 +2,7 @@ import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import helmet from 'helmet';
-import { timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SupabaseClient } from '@supabase/supabase-js';
@@ -25,7 +25,12 @@ import {
   resolveMonitorCronConcurrency,
   runMonitoringCycle
 } from './services/monitoringScheduler';
-import { processPendingWebhookDeliveries } from './services/webhookAlertService';
+import {
+  processAlertCycle,
+  resolveEmailDeliveryBatchSize,
+  resolveEmailDeliveryConcurrency
+} from './services/alertDeliveryService';
+import { createEmailProviderFromEnv, EmailProvider } from './services/emailAlertService';
 import {
   CredentialMetadata,
   CredentialRepository,
@@ -50,6 +55,8 @@ dotenv.config();
 
 export const MONITOR_CRON_BATCH_SIZE = resolveMonitorCronBatchSize(process.env.MONITOR_CRON_BATCH_SIZE);
 export const MONITOR_CRON_CONCURRENCY = resolveMonitorCronConcurrency(process.env.MONITOR_CRON_CONCURRENCY);
+export const EMAIL_DELIVERY_BATCH_SIZE = resolveEmailDeliveryBatchSize(process.env.EMAIL_DELIVERY_BATCH_SIZE);
+export const EMAIL_DELIVERY_CONCURRENCY = resolveEmailDeliveryConcurrency(process.env.EMAIL_DELIVERY_CONCURRENCY);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -70,6 +77,7 @@ export interface CreateAppOptions {
   secureCookie?: boolean;
   sessionSecret?: string;
   monitorCronSecret?: string;
+  alertCronSecret?: string;
   sessionTtlSeconds?: number;
   credentialsEncryptionKey?: string;
   masterPasswordHash?: string;
@@ -78,7 +86,8 @@ export interface CreateAppOptions {
   vaultRevealRateLimiter?: LoginRateLimiter;
   getCredentialRepository?: () => CredentialRepository | null;
   runMonitoringCycle?: typeof runMonitoringCycle;
-  processPendingWebhookDeliveries?: typeof processPendingWebhookDeliveries;
+  processAlertCycle?: typeof processAlertCycle;
+  emailProvider?: EmailProvider;
 }
 
 function getAllowedOrigins(isProduction: boolean): string[] {
@@ -156,6 +165,10 @@ export function assertSecureProductionConfiguration(env: NodeJS.ProcessEnv = pro
 
   if (!validateSessionSecret(env.MONITOR_CRON_SECRET || '')) {
     throw new Error('MONITOR_CRON_SECRET é obrigatório em produção e deve possuir ao menos 32 bytes aleatórios.');
+  }
+
+  if (!validateSessionSecret(env.ALERT_CRON_SECRET || '')) {
+    throw new Error('ALERT_CRON_SECRET é obrigatório em produção e deve possuir ao menos 32 bytes aleatórios.');
   }
 
   if (!validateCredentialsEncryptionKey(env.CREDENTIALS_ENCRYPTION_KEY || '')) {
@@ -292,6 +305,7 @@ export function createApp(options: CreateAppOptions = {}) {
     : options.authProvider;
   const sessionSecret = options.sessionSecret ?? process.env.ADMIN_SESSION_SECRET ?? '';
   const monitorCronSecret = options.monitorCronSecret ?? process.env.MONITOR_CRON_SECRET ?? '';
+  const alertCronSecret = options.alertCronSecret ?? process.env.ALERT_CRON_SECRET ?? '';
   const credentialsEncryptionKey = options.credentialsEncryptionKey ?? process.env.CREDENTIALS_ENCRYPTION_KEY ?? '';
   const masterPasswordHash = options.masterPasswordHash ?? process.env.CREDENTIALS_MASTER_PASSWORD_HASH ?? '';
   const configuredTtl = Number(process.env.ADMIN_SESSION_TTL_SECONDS || DEFAULT_SESSION_TTL_SECONDS);
@@ -320,7 +334,8 @@ export function createApp(options: CreateAppOptions = {}) {
     return supabase ? new SupabaseCredentialRepository(supabase) : null;
   });
   const runMonitorCycle = options.runMonitoringCycle || runMonitoringCycle;
-  const deliverPendingWebhooks = options.processPendingWebhookDeliveries || processPendingWebhookDeliveries;
+  const runAlertCycle = options.processAlertCycle || processAlertCycle;
+  const emailProvider = options.emailProvider || createEmailProviderFromEnv();
 
   app.disable('x-powered-by');
   if (options.trustProxy ?? process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
@@ -338,7 +353,7 @@ export function createApp(options: CreateAppOptions = {}) {
         error.statusCode = 403;
         return callback(error);
       },
-      methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization']
     })(req, res, next);
   });
@@ -469,13 +484,6 @@ export function createApp(options: CreateAppOptions = {}) {
         'cron',
         MONITOR_CRON_BATCH_SIZE
       );
-      const alerts = cycle.acquired
-        ? await deliverPendingWebhooks(
-          supabase,
-          MONITOR_CRON_BATCH_SIZE,
-          MONITOR_CRON_CONCURRENCY
-        )
-        : { delivered: 0, failed: 0 };
       const remainingDue = await countRemainingDueSites(supabase, new Date().toISOString());
       return res.status(200).json({
         success: true,
@@ -488,11 +496,34 @@ export function createApp(options: CreateAppOptions = {}) {
         batchSize: MONITOR_CRON_BATCH_SIZE,
         concurrency: cycle.concurrency,
         durationMs: Date.now() - startedAt,
-        alerts
+        alertsDeferred: true
       });
     } catch (error) {
       console.error('[Internal Monitor Run]', error instanceof Error ? error.message : 'erro inesperado');
       return res.status(500).json({ error: 'Falha ao executar ciclo de monitoramento.', code: 'MONITOR_RUN_FAILED' });
+    }
+  });
+
+  app.post('/api/internal/alerts/run', async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const authorization = req.get('authorization') || '';
+    const providedSecret = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+    if (!secretsMatch(providedSecret, alertCronSecret)) {
+      return res.status(401).json({ error: 'Não autorizado.', code: 'UNAUTHORIZED' });
+    }
+    const supabase = getSupabase();
+    if (!supabase) return sendDatabaseUnavailable(res, isProduction);
+    try {
+      const result = await runAlertCycle(supabase, {
+        batchSize: EMAIL_DELIVERY_BATCH_SIZE,
+        concurrency: EMAIL_DELIVERY_CONCURRENCY,
+        emailProvider,
+        monitorPublicUrl: process.env.MONITOR_PUBLIC_URL
+      });
+      return res.status(200).json({ success: true, ...result });
+    } catch (error) {
+      console.error('[Internal Alerts Run]', error instanceof Error ? error.message : 'erro inesperado');
+      return res.status(500).json({ error: 'Falha ao executar ciclo de alertas.', code: 'ALERT_RUN_FAILED' });
     }
   });
 
@@ -944,19 +975,32 @@ export function createApp(options: CreateAppOptions = {}) {
   app.get('/api/alerts/config', async (_req, res) => {
     const supabase = getSupabase();
     if (!supabase) return sendDatabaseUnavailable(res, isProduction);
-    const [webhookResult, deliveriesResult] = await Promise.all([
+    const [webhookResult, emailResult, deliveriesResult] = await Promise.all([
       supabase.from('alert_webhooks').select('*').order('created_at', { ascending: true }).limit(1).maybeSingle(),
+      supabase.from('alert_email_configs').select('id, enabled, recipients, event_types, created_at, updated_at').limit(1).maybeSingle(),
       supabase.from('alert_deliveries')
-        .select('id, event_type, status, attempt_count, response_status, error_message, created_at, attempted_at, delivered_at')
+        .select('id, channel, recipient, event_type, status, attempt_count, response_status, provider_message_id, last_error_code, error_message, next_attempt_at, created_at, attempted_at, delivered_at')
         .order('created_at', { ascending: false })
-        .limit(20)
+        .limit(50)
     ]);
-    if (webhookResult.error || deliveriesResult.error) {
+    if (webhookResult.error || emailResult.error || deliveriesResult.error) {
       return res.status(500).json({ error: 'Falha ao carregar configuração de alertas.', code: 'ALERT_CONFIG_FAILED' });
     }
     return res.json({
       webhook: webhookResult.data || null,
-      email: { configured: false, functional: false, label: 'E-mail não configurado' },
+      email: {
+        ...(emailResult.data || {
+          enabled: false,
+          recipients: [],
+          event_types: ['incident_confirmed', 'recovery']
+        }),
+        configured: Boolean(emailResult.data),
+        provider: emailProvider.name,
+        providerReady: emailProvider.ready,
+        label: emailProvider.ready
+          ? emailResult.data?.enabled ? 'E-mail ativo' : 'Provedor pronto'
+          : 'Provedor não configurado'
+      },
       recentDeliveries: deliveriesResult.data || []
     });
   });
@@ -995,6 +1039,84 @@ export function createApp(options: CreateAppOptions = {}) {
       const mapped = getRequestError(error, isProduction);
       return res.status(mapped.statusCode).json({ error: mapped.message, code: mapped.code });
     }
+  });
+
+  app.put('/api/alerts/email', async (req, res) => {
+    try {
+      const supabase = getSupabase();
+      if (!supabase) return sendDatabaseUnavailable(res, isProduction);
+      const enabled = req.body?.enabled === true;
+      const allowedEvents = new Set(['incident_confirmed', 'recovery']);
+      const eventTypes = Array.isArray(req.body?.eventTypes)
+        ? [...new Set(req.body.eventTypes.filter((value: unknown) => typeof value === 'string' && allowedEvents.has(value)))]
+        : ['incident_confirmed', 'recovery'];
+      if (!eventTypes.length) {
+        return res.status(400).json({ error: 'Selecione ao menos um evento de e-mail.', code: 'INVALID_EMAIL_EVENTS' });
+      }
+      const rawRecipients: unknown[] = Array.isArray(req.body?.recipients) ? req.body.recipients : [];
+      const recipients: string[] = [...new Set(rawRecipients
+        .filter((value): value is string => typeof value === 'string')
+        .map((value) => value.trim().toLowerCase())
+        .filter(Boolean))];
+      const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (recipients.length > 50 || recipients.some((recipient) => recipient.length > 254 || !emailPattern.test(recipient))) {
+        return res.status(400).json({ error: 'Informe até 50 destinatários de e-mail válidos.', code: 'INVALID_EMAIL_RECIPIENTS' });
+      }
+      if (enabled && !recipients.length) {
+        return res.status(400).json({ error: 'Informe ao menos um destinatário para ativar o canal.', code: 'EMAIL_RECIPIENT_REQUIRED' });
+      }
+      if (enabled && !emailProvider.ready) {
+        return res.status(409).json({ error: 'Configure o provedor de e-mail no servidor antes de ativar o canal.', code: 'EMAIL_PROVIDER_NOT_READY' });
+      }
+      const { data: current, error: currentError } = await supabase
+        .from('alert_email_configs').select('id').limit(1).maybeSingle();
+      if (currentError) throw new SiteCheckError('Falha ao consultar configuração de e-mail.', 500, 'EMAIL_CONFIG_QUERY_FAILED');
+      const payload = { enabled, recipients, event_types: eventTypes };
+      const operation = current
+        ? supabase.from('alert_email_configs').update(payload).eq('id', current.id).select('id, enabled, recipients, event_types, created_at, updated_at').single()
+        : supabase.from('alert_email_configs').insert(payload).select('id, enabled, recipients, event_types, created_at, updated_at').single();
+      const { data, error } = await operation;
+      if (error || !data) throw new SiteCheckError('Falha ao salvar configuração de e-mail.', 500, 'EMAIL_CONFIG_SAVE_FAILED');
+      return res.json({
+        email: { ...data, configured: true, provider: emailProvider.name, providerReady: emailProvider.ready }
+      });
+    } catch (error) {
+      const mapped = getRequestError(error, isProduction);
+      return res.status(mapped.statusCode).json({ error: mapped.message, code: mapped.code });
+    }
+  });
+
+  app.post('/api/alerts/email/test', async (_req, res) => {
+    const supabase = getSupabase();
+    if (!supabase) return sendDatabaseUnavailable(res, isProduction);
+    if (!emailProvider.ready) {
+      return res.status(409).json({ error: 'O provedor de e-mail não está configurado no servidor.', code: 'EMAIL_PROVIDER_NOT_READY' });
+    }
+    const { data: config, error: configError } = await supabase
+      .from('alert_email_configs').select('id, recipients').limit(1).maybeSingle();
+    if (configError) return res.status(500).json({ error: 'Falha ao consultar configuração de e-mail.', code: 'EMAIL_CONFIG_QUERY_FAILED' });
+    if (!config?.recipients?.length) {
+      return res.status(400).json({ error: 'Salve ao menos um destinatário antes de enviar o teste.', code: 'EMAIL_RECIPIENT_REQUIRED' });
+    }
+    const eventKey = `email-test:${randomUUID()}`;
+    const testedAt = new Date().toISOString();
+    const rows = config.recipients.map((recipient: string) => ({
+      channel: 'email',
+      email_config_id: config.id,
+      recipient,
+      event_type: 'email_test',
+      event_key: eventKey,
+      payload: { eventVersion: 2, event: 'email_test', testedAt },
+      status: 'pending',
+      next_attempt_at: testedAt
+    }));
+    const { error } = await supabase.from('alert_deliveries').insert(rows);
+    if (error) return res.status(500).json({ error: 'Falha ao colocar o e-mail de teste na fila.', code: 'EMAIL_TEST_QUEUE_FAILED' });
+    return res.status(202).json({
+      success: true,
+      queued: rows.length,
+      message: 'E-mail de teste colocado na fila de entrega.'
+    });
   });
 
   app.post('/api/sites', async (req, res) => {
@@ -1163,10 +1285,7 @@ export function createApp(options: CreateAppOptions = {}) {
         { siteId: req.body?.siteId, url: req.body?.siteId ? undefined : req.body?.url },
         { supabase }
       );
-      const alerts = supabase
-        ? await deliverPendingWebhooks(supabase, 1)
-        : { delivered: 0, failed: 0 };
-      return res.json({ ...result, alerts });
+      return res.json({ ...result, alertsDeferred: true });
     } catch (error) {
       const mapped = getRequestError(error, isProduction);
       console.error('[HTTP Check Error]', mapped.code, mapped.message);
@@ -1227,6 +1346,7 @@ export function startServer() {
     console.log('  TECNIHUB MONITORAMENTO - BACKEND HTTP REAL');
     console.log(`  Servidor rodando na porta ${port}`);
     console.log(`  Anti-SSRF com DNS pinning | Cron: lote ${MONITOR_CRON_BATCH_SIZE}, concorrência ${MONITOR_CRON_CONCURRENCY}`);
+    console.log(`  Alertas persistentes: lote ${EMAIL_DELIVERY_BATCH_SIZE}, concorrência de e-mail ${EMAIL_DELIVERY_CONCURRENCY}`);
     console.log('========================================================');
   });
   return server;

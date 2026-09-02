@@ -12,6 +12,7 @@ export interface SiteRecordForCheck {
   id: string;
   url: string;
   name: string;
+  client_name?: string;
   domain?: string;
   is_active: boolean;
   is_wordpress?: boolean;
@@ -97,7 +98,7 @@ async function loadOfficialSite(siteId: string, supabase: SupabaseClient | null)
   const { data, error } = await supabase
     .from('sites')
     .select([
-      'id', 'url', 'name', 'domain', 'is_active', 'is_wordpress', 'check_interval',
+      'id', 'url', 'name', 'client_name', 'domain', 'is_active', 'is_wordpress', 'check_interval',
       'monitor_response_time', 'monitor_ssl', 'monitor_domain',
       'expected_content', 'expected_ga4_id', 'expected_gtm_id',
       'expected_google_ads_id', 'expected_meta_pixel_id', 'uses_rd_station'

@@ -517,7 +517,7 @@ describe('SSL, DNS e alertas controlados', () => {
     assert.match(events[0].key, /93\.184\.216\.34:93\.184\.216\.35/);
   });
 
-  it('mantém alertas duráveis na fila para entrega síncrona pelo cron', async () => {
+  it('mantém eventos duráveis na outbox sem fazer entrega externa no monitoramento', async () => {
     let queuedRows: Array<Record<string, unknown>> = [];
     const supabase = {
       from(table: string) {
@@ -530,18 +530,7 @@ describe('SSL, DNS e alertas controlados', () => {
             })
           })
         };
-        if (table === 'alert_webhooks') return {
-          select: () => ({
-            eq: async () => ({
-              data: [{
-                id: 'webhook-1', url: 'https://alerts.example', timeout_ms: 5000,
-                event_types: ['incident_confirmed']
-              }],
-              error: null
-            })
-          })
-        };
-        if (table === 'alert_deliveries') return {
+        if (table === 'monitoring_alert_events') return {
           async upsert(rows: Array<Record<string, unknown>>) {
             queuedRows = rows;
             return { error: null };
@@ -552,7 +541,7 @@ describe('SSL, DNS e alertas controlados', () => {
     } as any;
     const queued = await queueMonitoringAlerts(
       supabase,
-      { id: 'site-1', name: 'Site', url: 'https://site.example', is_active: true },
+      { id: 'site-1', client_name: 'Cliente', name: 'Site', url: 'https://site.example', is_active: true },
       {
         success: true,
         siteId: 'site-1',

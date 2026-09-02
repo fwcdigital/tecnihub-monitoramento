@@ -6,7 +6,9 @@ import { describe, it } from 'node:test';
 const migrationsDirectory = path.resolve(process.cwd(), 'supabase', 'migrations');
 const readMigration = (name: string) => readFileSync(path.join(migrationsDirectory, name), 'utf8');
 const monitoringSql = readMigration('20260901_003_monitoring_engine.sql');
+const webhookSql = readMigration('20260901_004_alert_webhooks.sql');
 const vaultSql = readMigration('20260901_005_technical_credentials_vault.sql');
+const alertsSql = readMigration('20260902_006_transactional_alert_outbox_email.sql');
 
 describe('contratos das migrations finais', () => {
   it('mantém migrations numeradas e ordenáveis sem reaplicar schema.sql', () => {
@@ -16,7 +18,8 @@ describe('contratos das migrations finais', () => {
       '20260831_002_restrict_direct_api_access.sql',
       '20260901_003_monitoring_engine.sql',
       '20260901_004_alert_webhooks.sql',
-      '20260901_005_technical_credentials_vault.sql'
+      '20260901_005_technical_credentials_vault.sql',
+      '20260902_006_transactional_alert_outbox_email.sql'
     ]);
     assert.equal(files.includes('schema.sql'), false);
   });
@@ -66,5 +69,43 @@ describe('contratos das migrations finais', () => {
     assert.doesNotMatch(allSql, /\bTRUNCATE\b/i);
     assert.doesNotMatch(allSql, /\bDROP\s+TABLE\b/i);
     assert.doesNotMatch(allSql, /\bDELETE\s+FROM\s+public\.(sites|checks|incidents|technical_credentials|credential_audit_log)\b/i);
+  });
+
+  it('cria outbox transacional e configuração de e-mail sem alterar migrations aplicadas', () => {
+    assert.match(alertsSql, /CREATE TABLE public\.monitoring_alert_events/i);
+    assert.match(alertsSql, /event_key TEXT NOT NULL UNIQUE/i);
+    assert.match(alertsSql, /CREATE TABLE public\.alert_email_configs/i);
+    assert.match(alertsSql, /ALTER TABLE public\.alert_deliveries/i);
+    assert.match(alertsSql, /ADD COLUMN channel TEXT NOT NULL DEFAULT 'webhook'/i);
+    assert.match(alertsSql, /ALTER COLUMN webhook_id DROP NOT NULL/i);
+    assert.doesNotMatch(alertsSql, /DROP TABLE/i);
+    assert.doesNotMatch(alertsSql, /TRUNCATE/i);
+  });
+
+  it('persiste abertura e recuperação na outbox dentro de record_monitoring_result', () => {
+    assert.match(alertsSql, /CREATE OR REPLACE FUNCTION public\.record_monitoring_result/i);
+    assert.match(alertsSql, /IF v_transition IN \('opened', 'resolved'\)/i);
+    assert.match(alertsSql, /INSERT INTO public\.monitoring_alert_events/i);
+    assert.match(alertsSql, /'incident:' \|\| v_active_incident[\s\S]+':confirmed'[\s\S]+':recovery'/i);
+    assert.match(alertsSql, /'incidentDurationSeconds', v_duration_seconds/i);
+    assert.match(alertsSql, /'clientName', v_site\.client_name/i);
+  });
+
+  it('claims de eventos e entregas são atômicos, recuperáveis e idempotentes', () => {
+    assert.match(alertsSql, /CREATE OR REPLACE FUNCTION public\.claim_monitoring_alert_events/i);
+    assert.match(alertsSql, /CREATE OR REPLACE FUNCTION public\.claim_due_alert_deliveries/i);
+    assert.match(alertsSql, /FOR UPDATE SKIP LOCKED/gi);
+    assert.match(
+      alertsSql,
+      /delivery\.processing_until,[\s\S]+delivery\.attempted_at \+ interval '60 seconds'[\s\S]+\) <= now\(\)/i,
+    );
+    assert.match(alertsSql, /attempt_count = delivery\.attempt_count \+ 1/i);
+    assert.match(webhookSql, /UNIQUE \(webhook_id, event_key\)/i);
+    assert.doesNotMatch(alertsSql, /DROP CONSTRAINT IF EXISTS alert_deliveries_webhook_id_event_key_key/i);
+    assert.doesNotMatch(alertsSql, /CREATE UNIQUE INDEX uq_alert_deliveries_webhook_event/i);
+    assert.match(alertsSql, /uq_alert_deliveries_email_event_recipient/i);
+    assert.match(alertsSql, /ON CONFLICT DO NOTHING/gi);
+    assert.match(alertsSql, /attempted_at \+ interval '60 seconds'/i);
+    assert.match(alertsSql, /SET search_path = pg_catalog, pg_temp/gi);
   });
 });

@@ -381,12 +381,58 @@ export interface AlertWebhookConfig {
   event_types: Array<'incident_confirmed' | 'recovery' | 'ssl_expiring' | 'dns_changed'>;
 }
 
+export type EmailAlertEventType = 'incident_confirmed' | 'recovery';
+
+export interface AlertEmailConfig {
+  id?: string;
+  enabled: boolean;
+  recipients: string[];
+  event_types: EmailAlertEventType[];
+  configured: boolean;
+  provider: string;
+  providerReady: boolean;
+  label: string;
+}
+
+export interface AlertDeliverySummary {
+  id: string;
+  channel: 'webhook' | 'email';
+  recipient?: string | null;
+  event_type: AlertWebhookConfig['event_types'][number] | 'email_test';
+  status: 'pending' | 'processing' | 'delivered' | 'failed';
+  attempt_count: number;
+  response_status?: number | null;
+  provider_message_id?: string | null;
+  last_error_code?: string | null;
+  error_message?: string | null;
+  next_attempt_at?: string | null;
+  created_at: string;
+  attempted_at?: string | null;
+  delivered_at?: string | null;
+}
+
 export async function getAlertConfiguration(): Promise<{
   webhook: AlertWebhookConfig | null;
-  email: { configured: boolean; functional: boolean; label: string };
-  recentDeliveries: Array<Record<string, any>>;
+  email: AlertEmailConfig;
+  recentDeliveries: AlertDeliverySummary[];
 }> {
   return apiRequest('/api/alerts/config');
+}
+
+export async function saveAlertEmail(config: {
+  enabled: boolean;
+  recipients: string[];
+  eventTypes: EmailAlertEventType[];
+}): Promise<AlertEmailConfig> {
+  const response = await apiRequest<{ email: AlertEmailConfig }>('/api/alerts/email', {
+    method: 'PUT',
+    body: JSON.stringify(config)
+  });
+  return response.email;
+}
+
+export async function queueAlertEmailTest(): Promise<{ success: boolean; queued: number; message: string }> {
+  return apiRequest('/api/alerts/email/test', { method: 'POST', body: JSON.stringify({}) });
 }
 
 export async function saveAlertWebhook(config: {

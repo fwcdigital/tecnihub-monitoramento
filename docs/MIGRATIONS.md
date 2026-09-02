@@ -41,17 +41,31 @@ para `anon`/`authenticated`; apenas `service_role` do backend recebe acesso. A
 migration 002 também foi revisada defensivamente para reconhecer essas e as demais
 tabelas internas caso já existam quando ela for aplicada.
 
+## 006 — outbox transacional e alertas multicanal
+
+Arquivo: `supabase/migrations/20260902_006_transactional_alert_outbox_email.sql`.
+
+- cria `monitoring_alert_events`, gravada na mesma transação que abre ou resolve incidente;
+- cria a configuração administrativa `alert_email_configs` sem armazenar credenciais do provedor;
+- generaliza `alert_deliveries` para webhook e e-mail, preservando registros existentes;
+- cria fan-out idempotente, claims com `FOR UPDATE SKIP LOCKED`, leases recuperáveis e retries persistentes;
+- mantém `incident_confirmed` e `recovery` como únicos eventos selecionáveis para e-mail nesta versão.
+
+Ela não envia mensagens e não aplica credenciais. O envio só acontece quando o cron externo chama
+`POST /api/internal/alerts/run` depois do deploy do backend.
+
 ## Ordem recomendada para uma janela futura
 
 1. Criar snapshot/backup do Supabase.
 2. Desabilitar temporariamente o Hostinger Cron (não existe scheduler por `setInterval` no Express).
 3. Verificar se há mais de um incidente ativo por site; não apagar nem resolver automaticamente.
-4. Aplicar 001, 002, 003, 004 e 005, nessa ordem, em ambiente validado.
-5. Configurar `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `ADMIN_SESSION_SECRET`, `MONITOR_CRON_SECRET`, `MONITOR_CRON_BATCH_SIZE`, `MONITOR_CRON_CONCURRENCY`, `CREDENTIALS_ENCRYPTION_KEY`, `CREDENTIALS_MASTER_PASSWORD_HASH`, `ALLOWED_ORIGINS` e `TRUST_PROXY` no backend.
+4. Aplicar 001, 002, 003, 004, 005 e 006, nessa ordem, em ambiente validado.
+5. Configurar as variáveis de backend descritas em `.env.example`, incluindo os segredos distintos `MONITOR_CRON_SECRET` e `ALERT_CRON_SECRET` e as variáveis do Resend.
 6. Publicar o código em uma ação separada e validar login, página pública, CRUD, check individual, lote, histórico e métricas.
 7. Configurar o cron-job.org para `POST /api/internal/monitor/run` com `Authorization: Bearer <MONITOR_CRON_SECRET>` a cada minuto e timeout de 30 segundos.
 8. Confirmar uma execução em `monitoring_runs`, atualização de `next_check_at` e ausência de checks duplicados.
 9. Confirmar backup seguro e testado da chave do cofre fora do Git, Supabase e frontend.
+10. Configurar um segundo cron para `POST /api/internal/alerts/run` com `ALERT_CRON_SECRET` e validar outbox, entregas e retries.
 
 O endpoint retorna `200`; quando outro lease válido já executa o ciclo, informa `overlappingRun: true` e não duplica sites. O segredo nunca deve usar prefixo `VITE_`, aparecer em URL/query string, logs, respostas ou Git.
 
@@ -108,6 +122,14 @@ Para cada janela usa-se `checked_at` real. O denominador contém todos os checks
   criptografada, backup e autorização explícita.
 - **Dependências:** 003, `CREDENTIALS_ENCRYPTION_KEY` e hash da senha mestre.
   **Ordem:** quinta.
+
+### 006
+
+- **SQL:** `20260902_006_transactional_alert_outbox_email.sql`.
+- **Impacto:** adiciona outbox e configuração de e-mail e evolui a fila existente sem apagar webhooks ou entregas.
+- **Risco:** o código novo depende das tabelas/RPCs novos; aplicar a migration antes de publicar o backend.
+- **Rollback:** desativar o cron de alertas e os canais; preservar outbox e histórico. Não remover colunas/tabelas sem backup e autorização.
+- **Dependências:** 003, 004 e `handle_updated_at`. **Ordem:** sexta.
 
 ## Índices e limites de escala
 
