@@ -103,15 +103,24 @@ export async function hashMasterPassword(password: string, salt = randomBytes(16
   return [MASTER_HASH_PREFIX, SCRYPT_OPTIONS.N, SCRYPT_OPTIONS.r, SCRYPT_OPTIONS.p, salt.toString('base64url'), derived.toString('base64url')].join('$');
 }
 
+function normalizeMasterPasswordHash(storedHash: string): string {
+  let normalized = storedHash.trim();
+  const hasMatchingQuotes = (normalized.startsWith('"') && normalized.endsWith('"'))
+    || (normalized.startsWith("'") && normalized.endsWith("'"));
+  if (hasMatchingQuotes) normalized = normalized.slice(1, -1).trim();
+  return normalized;
+}
+
 export function validateMasterPasswordHashFormat(storedHash: string): boolean {
-  const [prefix, n, r, p, salt, hash, extra] = storedHash.split('$');
+  const [prefix, n, r, p, salt, hash, extra] = normalizeMasterPasswordHash(storedHash).split('$');
   return !extra && prefix === MASTER_HASH_PREFIX && Number(n) === SCRYPT_OPTIONS.N && Number(r) === SCRYPT_OPTIONS.r &&
     Number(p) === SCRYPT_OPTIONS.p && /^[A-Za-z0-9_-]{22}$/.test(salt || '') && /^[A-Za-z0-9_-]{43}$/.test(hash || '');
 }
 
 export async function verifyMasterPassword(password: string, storedHash: string): Promise<boolean> {
-  if (!password || password.length > 512 || !validateMasterPasswordHashFormat(storedHash)) return false;
-  const [, n, r, p, saltValue, hashValue] = storedHash.split('$');
+  const normalizedHash = normalizeMasterPasswordHash(storedHash);
+  if (!password || password.length > 512 || !validateMasterPasswordHashFormat(normalizedHash)) return false;
+  const [, n, r, p, saltValue, hashValue] = normalizedHash.split('$');
   const expected = Buffer.from(hashValue, 'base64url');
   const actual = await deriveScrypt(password, Buffer.from(saltValue, 'base64url'), expected.length, {
     N: Number(n), r: Number(r), p: Number(p), maxmem: SCRYPT_OPTIONS.maxmem

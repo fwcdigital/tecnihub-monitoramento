@@ -17,6 +17,7 @@ import {
   decryptCredentialSecret,
   encryptCredentialSecret,
   hashMasterPassword,
+  validateMasterPasswordHashFormat,
   verifyMasterPassword,
   verifyVaultSessionCookie
 } from './credentialsVault';
@@ -111,10 +112,24 @@ describe('criptografia e autorização do cofre', () => {
   });
 
   it('valida senha mestre correta e rejeita a incorreta', async () => {
-    const hash = await hashMasterPassword('Senha-Mestre-Correta-123!');
-    assert.equal(await verifyMasterPassword('Senha-Mestre-Correta-123!', hash), true);
+    const password = 'Senha-Mestre-Correta-123!';
+    const hash = await hashMasterPassword(password);
+    assert.equal(validateMasterPasswordHashFormat(hash), true);
+    assert.equal(await verifyMasterPassword(password, hash), true);
     assert.equal(await verifyMasterPassword('senha-incorreta', hash), false);
     assert.equal(hash.includes('Senha-Mestre-Correta'), false);
+  });
+
+  it('normaliza somente aspas e whitespace externos sem flexibilizar o formato scrypt', async () => {
+    const password = 'Senha-Mestre-Correta-123!';
+    const hash = await hashMasterPassword(password);
+    for (const configuredValue of [`  ${hash}\r\n`, `"${hash}"`, `'${hash}'`]) {
+      assert.equal(validateMasterPasswordHashFormat(configuredValue), true);
+      assert.equal(await verifyMasterPassword(password, configuredValue), true);
+    }
+    assert.equal(validateMasterPasswordHashFormat(hash.replace('scrypt-v1', 'scrypt-v0')), false);
+    assert.equal(validateMasterPasswordHashFormat(hash.replace('$16384$', '$8192$')), false);
+    assert.equal(validateMasterPasswordHashFormat(`${hash}$extra`), false);
   });
 
   it('expira a autorização privilegiada e a vincula ao administrador', () => {
