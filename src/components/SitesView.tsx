@@ -18,6 +18,7 @@ import {
   Download
 } from 'lucide-react';
 import { Site, SiteStatus, HostingProvider } from '../types';
+import { domainUnavailableLabel, responseTimeUnavailableLabel, siteStatusLabel, sslUnavailableLabel } from '../utils/diagnosticLabels';
 
 interface SitesViewProps {
   sites: Site[];
@@ -79,11 +80,11 @@ export const SitesView: React.FC<SitesViewProps> = ({
       `"${s.url}"`,
       `"${s.domain}"`,
       `"${s.hosting}"`,
-      s.status,
-      s.uptime30d === null ? 'Sem dados' : s.uptime30dReliable ? `${s.uptime30d}%` : `Histórico parcial (${s.uptime30d}%)`,
-      s.responseTime === null ? 'Sem dados' : `${s.responseTime}s`,
-      s.sslDaysRemaining ?? 'Indisponível',
-      s.domainDaysRemaining ?? 'Indisponível'
+      siteStatusLabel(s.status),
+      s.uptime30d === null ? 'Sem dados suficientes' : s.uptime30dReliable ? `${s.uptime30d}%` : `Histórico parcial (${s.uptime30d}%)`,
+      s.responseTime === null ? responseTimeUnavailableLabel(s) : `${s.responseTime}s`,
+      s.sslDaysRemaining ?? sslUnavailableLabel(s),
+      s.domainDaysRemaining ?? domainUnavailableLabel(s)
     ]);
     const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
     const encodedUri = encodeURI(csvContent);
@@ -271,13 +272,13 @@ export const SitesView: React.FC<SitesViewProps> = ({
                         )}
                         {site.status === 'security_blocked' && (
                           <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-neutral-400 font-mono">
-                            <span className="w-1.5 h-1.5 rounded-full bg-neutral-500" /> Segurança
+                            <span className="w-1.5 h-1.5 rounded-full bg-neutral-500" /> Verificação bloqueada
                           </span>
                         )}
                         {site.status === 'critical' && (
                           <span className="inline-flex items-center gap-1.5 font-semibold text-rose-400">
                             <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
-                            Crítico ({site.httpStatus})
+                            Falha crítica
                           </span>
                         )}
                         {site.status === 'paused' && (
@@ -289,7 +290,7 @@ export const SitesView: React.FC<SitesViewProps> = ({
                         {site.status === 'unknown' && (
                           <span className="inline-flex items-center gap-1.5 font-medium text-neutral-500">
                             <span className="w-1.5 h-1.5 rounded-full bg-neutral-600" />
-                            Sem dados
+                            Status ainda não confirmado
                           </span>
                         )}
                       </td>
@@ -297,14 +298,14 @@ export const SitesView: React.FC<SitesViewProps> = ({
                       {/* Uptime */}
                       <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
                         <span className={site.uptime30d !== null && site.uptime30d < 99.0 ? 'text-amber-400 font-bold' : 'text-neutral-200'}>
-                          {site.uptime30d === null ? 'Sem dados' : site.uptime30dReliable ? `${site.uptime30d.toFixed(2)}%` : `Parcial (${site.uptime30d.toFixed(2)}%)`}
+                          {site.uptime30d === null ? 'Sem dados suficientes' : site.uptime30dReliable ? `${site.uptime30d.toFixed(2)}%` : `Parcial (${site.uptime30d.toFixed(2)}%)`}
                         </span>
                       </td>
 
                       {/* Resposta */}
                       <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
                         {isOffline || site.responseTime === null ? (
-                          <span className="text-neutral-500">-</span>
+                          <span className="text-neutral-500">{responseTimeUnavailableLabel(site)}</span>
                         ) : (
                           <span className={site.responseTime > 3.0 ? 'text-amber-400 font-bold' : 'text-neutral-200'}>
                             {site.responseTime.toFixed(2)}s
@@ -315,14 +316,14 @@ export const SitesView: React.FC<SitesViewProps> = ({
                       {/* SSL */}
                       <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
                         <span className={site.sslDaysRemaining !== null && site.sslDaysRemaining <= 15 ? 'text-amber-400 font-bold' : 'text-neutral-400'}>
-                          {site.sslDaysRemaining === null ? 'Indisponível' : `${site.sslDaysRemaining}d`}
+                          {site.sslDaysRemaining === null ? sslUnavailableLabel(site) : `${site.sslDaysRemaining}d`}
                         </span>
                       </td>
 
                       {/* Domínio */}
                       <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
                         <span className={site.domainDaysRemaining !== null && site.domainDaysRemaining <= 15 ? 'text-amber-400 font-bold' : 'text-neutral-400'}>
-                          {site.domainDaysRemaining === null ? 'Indisponível' : `${site.domainDaysRemaining}d`}
+                          {site.domainDaysRemaining === null ? domainUnavailableLabel(site) : `${site.domainDaysRemaining}d`}
                         </span>
                       </td>
 

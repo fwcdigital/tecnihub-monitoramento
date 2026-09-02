@@ -1,11 +1,18 @@
 import React, { useState, useEffect } from 'react';
-import { X, Globe, Server, Clock, Shield, Search, Check, AlertCircle, Tag, Radio } from 'lucide-react';
-import { Site, HostingProvider, MonitoringFrequency, SiteTrackingConfig } from '../types';
+import { X, Globe, Server, Clock, Shield, Search, Check, AlertCircle, Tag, Radio, Edit3, KeyRound, Plus, Trash2 } from 'lucide-react';
+import { Site, HostingProvider, MonitoringFrequency, SiteTrackingConfig, TechnicalCredentialPayload } from '../types';
+import {
+  EMPTY_TECHNICAL_ACCESS,
+  TECHNICAL_ACCESS_TYPE_LABELS,
+  TechnicalAccessFields,
+  technicalAccessTitle,
+  validateTechnicalAccess
+} from './TechnicalAccessFields';
 
 interface AddEditSiteModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (siteData: Partial<Site>) => Promise<boolean> | boolean;
+  onSave: (siteData: Partial<Site>, accesses?: TechnicalCredentialPayload[]) => Promise<boolean> | boolean;
   siteToEdit?: Site | null;
   isSaving?: boolean;
 }
@@ -52,6 +59,12 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
 
   const [searchConsoleEnabled, setSearchConsoleEnabled] = useState(false);
   const [searchConsoleConfigured, setSearchConsoleConfigured] = useState(false);
+
+  const [technicalAccesses, setTechnicalAccesses] = useState<TechnicalCredentialPayload[]>([]);
+  const [accessDraft, setAccessDraft] = useState<TechnicalCredentialPayload>({ ...EMPTY_TECHNICAL_ACCESS });
+  const [editingAccessIndex, setEditingAccessIndex] = useState<number | null>(null);
+  const [showAccessEditor, setShowAccessEditor] = useState(false);
+  const [accessError, setAccessError] = useState('');
 
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -122,8 +135,33 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
       setSearchConsoleEnabled(false);
       setSearchConsoleConfigured(false);
     }
+    setTechnicalAccesses([]);
+    setAccessDraft({ ...EMPTY_TECHNICAL_ACCESS });
+    setEditingAccessIndex(null);
+    setShowAccessEditor(false);
+    setAccessError('');
     setErrors({});
   }, [siteToEdit, isOpen]);
+
+  const accessDraftHasContent = (draft: TechnicalCredentialPayload) => Boolean(
+    draft.serviceName || draft.provider || draft.url || draft.username || draft.host || draft.port || draft.notes || draft.password
+  );
+
+  const resetAccessDraft = () => {
+    setAccessDraft({ ...EMPTY_TECHNICAL_ACCESS });
+    setEditingAccessIndex(null);
+    setShowAccessEditor(false);
+    setAccessError('');
+  };
+
+  const saveAccessDraft = () => {
+    const validationError = validateTechnicalAccess(accessDraft, true);
+    if (validationError) { setAccessError(validationError); return; }
+    setTechnicalAccesses((current) => editingAccessIndex === null
+      ? [...current, { ...accessDraft }]
+      : current.map((item, index) => index === editingAccessIndex ? { ...accessDraft } : item));
+    resetAccessDraft();
+  };
 
   // Auto-fill domain from URL if empty
   const handleUrlChange = (value: string) => {
@@ -157,6 +195,18 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
       return;
     }
 
+    let accessesToCreate = technicalAccesses;
+    if (!siteToEdit && showAccessEditor && accessDraftHasContent(accessDraft)) {
+      const validationError = validateTechnicalAccess(accessDraft, true);
+      if (validationError) {
+        setAccessError(validationError);
+        return;
+      }
+      accessesToCreate = editingAccessIndex === null
+        ? [...technicalAccesses, { ...accessDraft }]
+        : technicalAccesses.map((item, index) => index === editingAccessIndex ? { ...accessDraft } : item);
+    }
+
     // Build tracking config
     const trackingConfig: SiteTrackingConfig = {
       ga4: { enabled: ga4Enabled, expectedId: ga4Enabled ? ga4ExpectedId.trim() : '' },
@@ -186,7 +236,7 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
       monitorContent,
       expectedContentText: monitorContent ? expectedContentText.trim() : '',
       tracking: trackingConfig
-    });
+    }, siteToEdit ? undefined : accessesToCreate);
     if (saved) onClose();
   };
 
@@ -676,6 +726,68 @@ export const AddEditSiteModal: React.FC<AddEditSiteModalProps> = ({
               </div>
             </div>
           </div>
+
+          {!siteToEdit && (
+            <div className="space-y-3 pt-3 border-t border-[#1e1e1e]">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-[10px] font-semibold uppercase tracking-wider text-neutral-400 font-mono flex items-center gap-1.5">
+                    <KeyRound className="w-3 h-3" /> 4. Acessos Técnicos — opcional
+                  </h3>
+                  <p className="text-[11px] text-neutral-500 mt-0.5">
+                    Os acessos serão vinculados ao novo site e enviados ao cofre somente depois que o cadastro for confirmado.
+                  </p>
+                </div>
+                {!showAccessEditor && (
+                  <button type="button" onClick={() => { setAccessDraft({ ...EMPTY_TECHNICAL_ACCESS }); setEditingAccessIndex(null); setShowAccessEditor(true); }} className="shrink-0 inline-flex items-center gap-1.5 rounded border border-[#303030] px-2.5 py-1.5 text-[10px] font-semibold text-neutral-200 hover:bg-[#161616]">
+                    <Plus className="w-3 h-3" /> Adicionar acesso
+                  </button>
+                )}
+              </div>
+
+              {technicalAccesses.length > 0 && (
+                <div className="space-y-2">
+                  {technicalAccesses.map((access, index) => (
+                    <div key={`${access.type}-${index}`} className="flex items-center justify-between gap-3 rounded border border-[#222] bg-black p-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-semibold text-white truncate">{technicalAccessTitle(access)}</span>
+                          <span className="text-[9px] font-mono text-neutral-500">{TECHNICAL_ACCESS_TYPE_LABELS[access.type]}</span>
+                        </div>
+                        <p className="mt-1 truncate text-[10px] font-mono text-neutral-500">
+                          {access.url || (access.host ? `${access.host}:${access.port}` : access.username || 'Dados complementares preenchidos')} · Senha protegida
+                        </p>
+                      </div>
+                      <div className="flex gap-1">
+                        <button type="button" onClick={() => { setAccessDraft({ ...access }); setEditingAccessIndex(index); setShowAccessEditor(true); setAccessError(''); }} className="p-1.5 text-neutral-500 hover:text-white" title="Editar acesso"><Edit3 className="w-3.5 h-3.5" /></button>
+                        <button type="button" onClick={() => { setTechnicalAccesses((current) => current.filter((_, itemIndex) => itemIndex !== index)); resetAccessDraft(); }} className="p-1.5 text-neutral-500 hover:text-rose-400" title="Remover acesso"><Trash2 className="w-3.5 h-3.5" /></button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {showAccessEditor && (
+                <div className="space-y-3 rounded border border-[#292929] bg-[#050505] p-3">
+                  <TechnicalAccessFields value={accessDraft} onChange={(value) => { setAccessDraft(value); setAccessError(''); }} includePassword />
+                  {accessError && <p className="text-[10px] font-mono text-rose-400">{accessError}</p>}
+                  <p className="text-[10px] text-neutral-600">A senha permanece oculta e não será mantida na interface depois do envio ao cofre.</p>
+                  <div className="flex justify-end gap-2">
+                    <button type="button" onClick={resetAccessDraft} className="px-3 py-1.5 text-xs text-neutral-400 hover:text-white">Cancelar acesso</button>
+                    <button type="button" onClick={saveAccessDraft} className="rounded bg-[#1d1d1d] border border-[#333] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#252525]">
+                      {editingAccessIndex === null ? 'Adicionar à lista' : 'Salvar acesso'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {!showAccessEditor && technicalAccesses.length === 0 && (
+                <div className="rounded border border-dashed border-[#292929] p-4 text-center text-[11px] text-neutral-600">
+                  Nenhum acesso será cadastrado agora. O site poderá recebê-los posteriormente em Detalhes do Site.
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Form Actions */}
           <div className="pt-3 border-t border-[#1e1e1e] flex items-center justify-end gap-2">

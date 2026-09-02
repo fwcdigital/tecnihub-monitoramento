@@ -133,7 +133,7 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({
               <div className="p-2.5 rounded bg-[#000000] border border-[#1e1e1e]">
                 <span className="text-[9px] font-mono uppercase text-neutral-500 block">Falhas carregadas</span>
                 <span className="text-xs font-mono font-bold text-rose-400 mt-0.5 block">
-                  {incident.failedChecksCount === null ? 'Indisponível' : `${incident.failedChecksCount} tentativas`}
+                  {incident.failedChecksCount === null ? 'Sem dados suficientes' : `${incident.failedChecksCount} tentativas`}
                 </span>
               </div>
 
@@ -143,6 +143,14 @@ export const IncidentDetailModal: React.FC<IncidentDetailModalProps> = ({
                   {incident.currentStatus}
                 </span>
               </div>
+              {incident.technicalCode && (
+                <div className="p-2.5 rounded bg-[#000000] border border-[#1e1e1e]">
+                  <span className="text-[9px] font-mono uppercase text-neutral-500 block">Código técnico</span>
+                  <span className="text-xs font-mono text-neutral-300 mt-0.5 block">
+                    {incident.technicalCode}
+                  </span>
+                </div>
+              )}
             </div>
           </div>
 

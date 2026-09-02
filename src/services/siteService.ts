@@ -12,6 +12,7 @@ import {
   MonitoringSeriesPoint,
   TrackingToolResult
 } from '../types';
+import { diagnosticSummary, diagnosticTypeLabel, missingHttpLabel } from '../utils/diagnosticLabels';
 
 async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -42,7 +43,7 @@ async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
 function formatFullDate(isoString: string): string {
   try {
     const date = new Date(isoString);
-    if (!Number.isFinite(date.getTime())) return 'Indisponível';
+    if (!Number.isFinite(date.getTime())) return 'Falha na verificação';
     const day = String(date.getDate()).padStart(2, '0');
     const month = String(date.getMonth() + 1).padStart(2, '0');
     const hours = String(date.getHours()).padStart(2, '0');
@@ -57,7 +58,7 @@ function formatFullDate(isoString: string): string {
 function formatRelativeTime(isoString: string): string {
   try {
     const parsedTime = new Date(isoString).getTime();
-    if (!Number.isFinite(parsedTime)) return 'Indisponível';
+    if (!Number.isFinite(parsedTime)) return 'Falha na verificação';
     const mins = Math.floor((Date.now() - parsedTime) / 60000);
     if (mins < 1) return 'Há instantes';
     if (mins === 1) return 'Há 1 min';
@@ -126,9 +127,9 @@ export function mapDbSiteToSite(
     timestamp: formatFullDate(check.checked_at),
     checkedAt: check.checked_at,
     status: check.status,
-    httpCode: check.http_status ?? (check.status === 'offline' ? 'ERR' : 'Indisponível'),
+    httpCode: check.http_status ?? missingHttpLabel(check.status, check.error_type),
     responseTime: hasValidResponseTime(check) ? +(check.response_time / 1000).toFixed(2) : 0,
-    result: check.result_message || check.error_message || (check.http_status !== null ? `HTTP ${check.http_status}` : 'Sem detalhe disponível'),
+    result: diagnosticSummary(check),
     expectedContentFound: check.expected_content_found ?? undefined,
     errorType: check.error_type || undefined,
     errorMessage: check.error_message || undefined,
@@ -179,8 +180,8 @@ export function mapDbSiteToSite(
     domainDaysRemaining: typeof domainInfo?.daysRemaining === 'number'
       ? domainInfo.daysRemaining
       : typeof domainInfo?.days_remaining === 'number' ? domainInfo.days_remaining : null,
-    lastCheck: latestCheck ? formatRelativeTime(latestCheck.checked_at) : 'Aguardando',
-    httpStatus: latestCheck?.http_status ?? (latestCheck?.status === 'offline' ? 'ERR' : null),
+    lastCheck: latestCheck ? formatRelativeTime(latestCheck.checked_at) : 'Ainda não verificado',
+    httpStatus: latestCheck?.http_status ?? (latestCheck ? missingHttpLabel(latestCheck.status, latestCheck.error_type) : null),
     monitorAvailability: true,
     monitorResponseTime: dbSite.monitor_response_time !== false,
     monitorSsl: dbSite.monitor_ssl !== false,
@@ -189,7 +190,7 @@ export function mapDbSiteToSite(
     monitorContent: Boolean(dbSite.expected_content),
     expectedContentText: dbSite.expected_content || '',
     consecutiveFailures: dbSite.consecutive_failures ?? 0,
-    createdAt: dbSite.created_at?.slice(0, 10) || 'Indisponível',
+    createdAt: dbSite.created_at?.slice(0, 10) || 'Falha na verificação',
     updatedAt: dbSite.updated_at,
     activeIncidentId: activeIncident?.id,
     checksHistory,
@@ -207,7 +208,7 @@ export function mapDbSiteToSite(
         googleAds: trackingResult('googleAds')!,
         metaPixel: trackingResult('metaPixel')!,
         searchConsole: {
-          detected: false, status: 'gray', statusLabel: 'Verificação não disponível',
+          detected: false, status: 'gray', statusLabel: 'Não aplicável',
           message: 'A propriedade não pode ser confirmada por HTML.'
         },
         rdStation: trackingResult('rdStation')!
@@ -246,7 +247,7 @@ export async function getSitesFromDatabase(): Promise<Site[]> {
 function formatIncidentDuration(startedAt: string, resolvedAt?: string | null): string {
   const start = new Date(startedAt).getTime();
   const end = resolvedAt ? new Date(resolvedAt).getTime() : Date.now();
-  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 'Indisponível';
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 'Falha na verificação';
   const minutes = Math.floor((end - start) / 60_000);
   if (minutes < 1) return 'Menos de 1 minuto';
   if (minutes < 60) return `${minutes} min`;
@@ -276,6 +277,14 @@ export function mapDbIncidentToIncident(dbIncident: DbIncident, sites: Site[]): 
     || relevantChecks.find((check) => check.status === 'online');
   const latestCheck = relevantChecks[0];
   const incidentFailure = failureChecks[0];
+  const rawType = String(dbIncident.type || '');
+  const technicalType = /^[A-Z][A-Z0-9_]+$/.test(rawType) ? rawType : null;
+  const technicalCode = dbIncident.reason || technicalType || undefined;
+  const displayType = technicalType
+    ? diagnosticTypeLabel(technicalType, 'offline', null)
+    : rawType || 'Falha na verificação';
+  const rawExplanation = dbIncident.description || dbIncident.title;
+  const explanationContainsCode = /\b(?:E[A-Z0-9_]{2,}|ERR_[A-Z0-9_]+|UNKNOWN|CONNECTION_ERROR|TLS_ERROR|DNS_[A-Z_]+|SSRF_[A-Z_]+)\b/.test(rawExplanation || '');
 
   return {
     id: dbIncident.id,
@@ -283,7 +292,7 @@ export function mapDbIncidentToIncident(dbIncident: DbIncident, sites: Site[]): 
     client: site?.client || dbIncident.sites?.client_name || 'Site não encontrado',
     siteName: site?.siteName || dbIncident.sites?.name || 'Cadastro indisponível',
     url: site?.url || dbIncident.sites?.url || '',
-    type: dbIncident.type as IncidentType,
+    type: displayType as IncidentType,
     severity: dbIncident.severity,
     status: dbIncident.status,
     startedAt: dbIncident.started_at,
@@ -293,14 +302,17 @@ export function mapDbIncidentToIncident(dbIncident: DbIncident, sites: Site[]): 
       : formatIncidentDuration(dbIncident.started_at, dbIncident.resolved_at),
     resolvedAt: dbIncident.resolved_at ? formatFullDate(dbIncident.resolved_at) : undefined,
     resolvedAtIso: dbIncident.resolved_at || undefined,
-    httpReturned: incidentFailure?.httpCode ?? 'Indisponível',
+    httpReturned: incidentFailure?.httpCode ?? 'Sem dados suficientes',
     failedChecksCount: dbIncident.failed_checks_count || failureChecks.length || null,
-    lastSuccessfulCheck: lastSuccess?.timestamp || 'Sem registro disponível',
-    firstErrorCheck: firstFailure?.timestamp || 'Sem registro disponível',
+    lastSuccessfulCheck: lastSuccess?.timestamp || 'Sem dados suficientes',
+    firstErrorCheck: firstFailure?.timestamp || 'Sem dados suficientes',
     currentStatus: dbIncident.status === 'resolved'
       ? 'Resolvido'
       : latestCheck?.result || 'Incidente ativo; aguardando nova verificação',
-    explanation: dbIncident.description || dbIncident.reason || dbIncident.title
+    explanation: rawExplanation && !explanationContainsCode
+      ? rawExplanation
+      : diagnosticTypeLabel(technicalCode, 'offline', null),
+    technicalCode
   };
 }
 

@@ -8,7 +8,8 @@ import { validateUrlForSSRF } from './ssrfProtection';
 import { determineIncidentTransition, processSiteCheck } from './siteCheckService';
 import { isSiteDue, runMonitoringCycle } from './monitoringScheduler';
 import { buildEvents } from './webhookAlertService';
-import { mapDbSiteToSite } from '../../src/services/siteService';
+import { mapDbIncidentToIncident, mapDbSiteToSite } from '../../src/services/siteService';
+import { diagnosticTypeLabel } from '../../src/utils/diagnosticLabels';
 import type { DbCheck, DbSite } from '../../src/types';
 
 describe('classificação HTTP', () => {
@@ -546,11 +547,11 @@ describe('mapeamento sem telemetria fabricada', () => {
       response_time: null
     };
     const site = mapDbSiteToSite({ ...dbSite, created_at: '' }, [check]);
-    assert.equal(site.createdAt, 'Indisponível');
-    assert.equal(site.lastCheck, 'Indisponível');
-    assert.equal(site.checksHistory[0].timestamp, 'Indisponível');
-    assert.equal(site.checksHistory[0].httpCode, 'Indisponível');
-    assert.equal(site.checksHistory[0].result, 'Sem detalhe disponível');
+    assert.equal(site.createdAt, 'Falha na verificação');
+    assert.equal(site.lastCheck, 'Falha na verificação');
+    assert.equal(site.checksHistory[0].timestamp, 'Falha na verificação');
+    assert.equal(site.checksHistory[0].httpCode, 'Falha na verificação');
+    assert.equal(site.checksHistory[0].result, 'Falha na verificação');
   });
 
   it('usa o último check válido mesmo quando o estado persistido ainda está pending', () => {
@@ -586,5 +587,23 @@ describe('mapeamento sem telemetria fabricada', () => {
     assert.equal(site.responseTime, null);
     assert.equal(site.avgResponseTime, null);
     assert.equal(site.checksHistory[0].responseTime, 0);
+  });
+
+  it('traduz códigos técnicos somente para a nomenclatura principal', () => {
+    assert.equal(diagnosticTypeLabel('EPROTO', 'critical', null), 'Falha na conexão HTTPS/SSL');
+    assert.equal(diagnosticTypeLabel('UNKNOWN', 'warning', null), 'Falha na verificação');
+    assert.equal(diagnosticTypeLabel('ECONNREFUSED', 'offline', null), 'Conexão recusada pelo servidor');
+  });
+
+  it('mantém código legado do incidente apenas nos detalhes técnicos', () => {
+    const incident = mapDbIncidentToIncident({
+      id: 'incident-legacy', site_id: dbSite.id, type: 'EPROTO', severity: 'critical',
+      title: 'Falha EPROTO', description: null, reason: 'EPROTO',
+      started_at: '2026-09-01T11:00:00.000Z', status: 'active',
+      created_at: '2026-09-01T11:00:00.000Z'
+    }, []);
+    assert.equal(incident.type, 'Falha na conexão HTTPS/SSL');
+    assert.equal(incident.explanation, 'Falha na conexão HTTPS/SSL');
+    assert.equal(incident.technicalCode, 'EPROTO');
   });
 });

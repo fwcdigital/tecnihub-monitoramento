@@ -10,8 +10,7 @@ import {
   ChevronRight,
   ShieldCheck,
   X,
-  LogOut,
-  KeyRound
+  LogOut
 } from 'lucide-react';
 import { NavigationTab } from '../types';
 import { TecnihubLogo } from './TecnihubLogo';
@@ -70,12 +69,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {totalSitesCount}
         </span>
       )
-    },
-    {
-      id: 'accesses' as NavigationTab,
-      label: 'Acessos',
-      icon: KeyRound,
-      badge: null
     },
     {
       id: 'incidents' as NavigationTab,
@@ -205,7 +198,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </span>
             ) : unknownCount > 0 ? (
               <span className="inline-flex items-center gap-1 text-[9px] text-neutral-400 font-mono">
-                Dados pendentes
+                Status pendente
               </span>
             ) : (
               <span className="inline-flex items-center gap-1 text-[9px] text-emerald-400 font-mono">
@@ -249,7 +242,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             )}
             {unknownCount > 0 && (
               <div className="flex justify-between items-center text-neutral-300">
-                <span>Sem dados</span>
+                <span>Status ainda não confirmado</span>
                 <span className="font-bold text-neutral-400">{unknownCount}</span>
               </div>
             )}

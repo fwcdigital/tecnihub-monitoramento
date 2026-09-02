@@ -2,7 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { 
   Site, 
   Incident, 
-  NavigationTab
+  NavigationTab,
+  TechnicalCredentialPayload
 } from './types';
 import { 
   getSitesFromDatabase, 
@@ -17,6 +18,7 @@ import {
   mapDbIncidentToIncident
 } from './services/siteService';
 import { AdminUser, getAdminSession, loginAdmin, logoutAdmin } from './services/authService';
+import { createTechnicalCredential } from './services/credentialService';
 
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
@@ -33,7 +35,7 @@ import { ConfirmDeleteModal } from './components/ConfirmDeleteModal';
 import { ToastContainer, ToastMessage } from './components/Toast';
 import { LoginView } from './components/LoginView';
 import { PublicStatusPage } from './components/PublicStatusPage';
-import { AccessesView } from './components/AccessesView';
+import { diagnosticTypeLabel } from './utils/diagnosticLabels';
 
 function AdminApp() {
   const [authStatus, setAuthStatus] = useState<'checking' | 'authenticated' | 'unauthenticated'>('checking');
@@ -199,7 +201,7 @@ function AdminApp() {
   };
 
   // Save Site (Create or Update)
-  const handleSaveSite = async (siteData: Partial<Site>) => {
+  const handleSaveSite = async (siteData: Partial<Site>, technicalAccesses: TechnicalCredentialPayload[] = []) => {
     setIsSavingSite(true);
     try {
       if (siteToEdit) {
@@ -217,6 +219,27 @@ function AdminApp() {
         if (createdSite) {
           setSites((prev) => [createdSite, ...prev]);
           addToast('success', 'Site cadastrado com sucesso', `${createdSite.siteName} foi salvo no banco.`);
+          if (technicalAccesses.length > 0) {
+            let createdAccesses = 0;
+            for (const access of technicalAccesses) {
+              try {
+                await createTechnicalCredential(createdSite.id, access);
+                createdAccesses++;
+              } catch {
+                // The site remains valid. Failed optional accesses can be added
+                // later from the site detail without resubmitting the site.
+              }
+            }
+            if (createdAccesses === technicalAccesses.length) {
+              addToast('success', 'Acessos técnicos cadastrados', `${createdAccesses} acesso(s) foram vinculados ao site e protegidos pelo cofre.`);
+            } else {
+              addToast(
+                'warning',
+                'Site salvo; alguns acessos ficaram pendentes',
+                `${createdAccesses} de ${technicalAccesses.length} acesso(s) foram cadastrados. Complete os demais em Detalhes do Site.`
+              );
+            }
+          }
         }
       }
       return true;
@@ -299,6 +322,7 @@ function AdminApp() {
     try {
       const response = await checkSiteNow(siteId);
       const { result } = response;
+      const diagnosticLabel = diagnosticTypeLabel(result.errorType, result.status, result.httpStatus);
       try {
         await reloadOperationalData();
       } catch (reloadError) {
@@ -315,21 +339,21 @@ function AdminApp() {
         addToast(
           'warning',
           'Alerta na verificação',
-          `${targetSite.domain} retornou HTTP ${result.httpStatus}. ${result.errorMessage || ''}`
+          `${targetSite.domain}: ${diagnosticLabel}.`
         );
       } else if (result.status === 'security_blocked') {
         addToast('warning', 'Verificação bloqueada por segurança', `${targetSite.domain}: ${result.resultMessage}`);
       } else if (result.status === 'critical') {
         addToast(
           'error',
-          'CRÍTICO: erro do servidor',
-          `${targetSite.domain}: ${result.resultMessage}`
+          'Falha crítica na verificação',
+          `${targetSite.domain}: ${diagnosticLabel}.`
         );
       } else {
         addToast(
           'error',
-          'CRÍTICO: Falha na verificação',
-          `${targetSite.domain}: ${result.resultMessage}`
+          'Serviço indisponível',
+          `${targetSite.domain}: ${diagnosticLabel}.`
         );
       }
 
@@ -538,6 +562,7 @@ function AdminApp() {
               onEdit={handleOpenEditSite}
               onTogglePause={handleTogglePauseSite}
               isChecking={checkingSiteId === selectedSiteDetail.id}
+              notify={addToast}
             />
           )}
 
@@ -548,10 +573,6 @@ function AdminApp() {
               onResolveIncident={handleResolveIncident}
               onRecheckSite={handleCheckSiteNow}
             />
-          )}
-
-          {currentTab === 'accesses' && (
-            <AccessesView sites={sites} notify={addToast} />
           )}
 
           {currentTab === 'alerts' && (

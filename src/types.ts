@@ -241,6 +241,7 @@ export interface Incident {
   firstErrorCheck: string;
   currentStatus: string;
   explanation: string;
+  technicalCode?: string;
 }
 
 export interface AlertRule {
@@ -306,4 +307,4 @@ export interface TechnicalCredentialPayload {
   password?: string;
 }
 
-export type NavigationTab = 'dashboard' | 'sites' | 'accesses' | 'incidents' | 'alerts' | 'reports' | 'settings' | 'site-detail';
+export type NavigationTab = 'dashboard' | 'sites' | 'incidents' | 'alerts' | 'reports' | 'settings' | 'site-detail';

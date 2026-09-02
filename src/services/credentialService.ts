@@ -54,11 +54,15 @@ export async function authorizeVault(masterPassword: string): Promise<{ authoriz
   return vaultRequest('/api/vault/authorize', { method: 'POST', body: JSON.stringify({ masterPassword }) });
 }
 
-export async function copyCredentialPassword(id: string): Promise<void> {
+export async function revealCredentialPassword(id: string): Promise<string> {
   const response = await vaultRequest<{ password: string }>(`/api/accesses/${encodeURIComponent(id)}/copy-password`, {
     method: 'POST', body: '{}'
   });
-  const transientSecret = response.password;
+  return response.password;
+}
+
+export async function copyCredentialPassword(id: string): Promise<void> {
+  const transientSecret = await revealCredentialPassword(id);
   try {
     await navigator.clipboard.writeText(transientSecret);
   } finally {

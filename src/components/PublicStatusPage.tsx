@@ -12,7 +12,7 @@ interface PublicSiteStatus {
 }
 
 const labels: Record<PublicSiteStatus['status'], string> = {
-  online: 'Operacional', warning: 'Atenção', critical: 'Crítico', offline: 'Indisponível', unknown: 'Sem dados'
+  online: 'Online', warning: 'Atenção necessária', critical: 'Falha crítica', offline: 'Offline', unknown: 'Status ainda não confirmado'
 };
 
 export const PublicStatusPage: React.FC = () => {
@@ -37,6 +37,7 @@ export const PublicStatusPage: React.FC = () => {
   useEffect(() => { void load(); }, []);
   const affected = sites.filter((site) => site.status === 'critical' || site.status === 'offline').length;
   const warnings = sites.filter((site) => site.status === 'warning').length;
+  const unconfirmed = sites.filter((site) => site.status === 'unknown').length;
 
   return (
     <div className="min-h-screen bg-black text-white">
@@ -64,10 +65,10 @@ export const PublicStatusPage: React.FC = () => {
           <div className="p-8 text-center text-xs font-mono text-neutral-500">Carregando estado dos serviços...</div>
         ) : (
           <>
-            <div className={`p-4 rounded border ${affected ? 'border-rose-900/60 bg-rose-950/20' : warnings ? 'border-amber-900/60 bg-amber-950/20' : 'border-emerald-900/50 bg-emerald-950/15'}`}>
+            <div className={`p-4 rounded border ${affected ? 'border-rose-900/60 bg-rose-950/20' : warnings ? 'border-amber-900/60 bg-amber-950/20' : unconfirmed ? 'border-neutral-800 bg-neutral-950/20' : 'border-emerald-900/50 bg-emerald-950/15'}`}>
               <div className="flex items-center gap-2 text-sm font-semibold">
                 <Activity className={`w-4 h-4 ${affected ? 'text-rose-400' : warnings ? 'text-amber-400' : 'text-emerald-400'}`} />
-                {sites.length === 0 ? 'Nenhum serviço público cadastrado' : affected ? `${affected} serviço(s) com indisponibilidade` : warnings ? `${warnings} serviço(s) requerem atenção` : 'Todos os serviços monitorados estão operacionais'}
+                {sites.length === 0 ? 'Nenhum serviço público cadastrado' : affected ? `${affected} serviço(s) com indisponibilidade` : warnings ? `${warnings} serviço(s) requerem atenção` : unconfirmed ? `${unconfirmed} serviço(s) ainda não verificado(s)` : 'Todos os serviços monitorados estão operacionais'}
               </div>
             </div>
             <div className="grid gap-2.5">
@@ -81,16 +82,16 @@ export const PublicStatusPage: React.FC = () => {
                     <span className={`text-[10px] font-mono font-bold uppercase px-2 py-1 rounded border ${site.status === 'online' ? 'text-emerald-400 border-emerald-900/60 bg-emerald-950/20' : site.status === 'warning' ? 'text-amber-400 border-amber-900/60 bg-amber-950/20' : site.status === 'unknown' ? 'text-neutral-400 border-neutral-800' : 'text-rose-400 border-rose-900/60 bg-rose-950/20'}`}>{labels[site.status]}</span>
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-3 pt-3 border-t border-[#1b1b1b] text-[10px] font-mono">
-                    <span className="text-neutral-500 flex items-center gap-1"><Clock className="w-3 h-3" />Último check: <strong className="text-neutral-300">{site.lastCheckedAt ? new Date(site.lastCheckedAt).toLocaleString('pt-BR') : 'Sem dados'}</strong></span>
-                    <span className="text-neutral-500 flex items-center gap-1"><Gauge className="w-3 h-3" />Resposta: <strong className="text-neutral-300">{site.responseTimeMs === null ? 'Sem dados' : `${Math.round(site.responseTimeMs)} ms`}</strong></span>
-                    <span className="text-neutral-500">Uptime 30d: <strong className="text-neutral-300">{site.uptime30d?.reliable ? `${Number(site.uptime30d.percentage).toFixed(2)}%` : 'Histórico insuficiente'}</strong></span>
+                    <span className="text-neutral-500 flex items-center gap-1"><Clock className="w-3 h-3" />Último check: <strong className="text-neutral-300">{site.lastCheckedAt ? new Date(site.lastCheckedAt).toLocaleString('pt-BR') : 'Ainda não verificado'}</strong></span>
+                    <span className="text-neutral-500 flex items-center gap-1"><Gauge className="w-3 h-3" />Resposta: <strong className="text-neutral-300">{site.responseTimeMs === null ? site.status === 'unknown' ? 'Ainda não verificado' : site.status === 'offline' || site.status === 'critical' ? 'Indisponível' : 'Não aplicável' : `${Math.round(site.responseTimeMs)} ms`}</strong></span>
+                    <span className="text-neutral-500">Uptime 30d: <strong className="text-neutral-300">{site.uptime30d?.reliable ? `${Number(site.uptime30d.percentage).toFixed(2)}%` : 'Sem dados suficientes'}</strong></span>
                   </div>
                 </article>
               ))}
             </div>
           </>
         )}
-        <p className="text-[9px] font-mono text-neutral-600 text-center">{generatedAt ? `Atualizado em ${new Date(generatedAt).toLocaleString('pt-BR')}` : 'Aguardando atualização'}</p>
+        <p className="text-[9px] font-mono text-neutral-600 text-center">{generatedAt ? `Atualizado em ${new Date(generatedAt).toLocaleString('pt-BR')}` : 'Ainda não atualizado'}</p>
       </main>
     </div>
   );

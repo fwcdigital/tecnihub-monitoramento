@@ -37,6 +37,8 @@ import {
 } from 'recharts';
 import { Site, CheckRecord, MonitoringSeriesPoint, SiteMetrics } from '../types';
 import { getSiteChecksPage, getSiteMonitoringMetrics } from '../services/siteService';
+import { domainUnavailableLabel, responseTimeUnavailableLabel, siteStatusLabel, sslUnavailableLabel } from '../utils/diagnosticLabels';
+import { SiteTechnicalAccesses } from './AccessesView';
 
 interface SiteDetailViewProps {
   site: Site;
@@ -45,6 +47,7 @@ interface SiteDetailViewProps {
   onEdit: (site: Site) => void;
   onTogglePause: (siteId: string) => void;
   isChecking?: boolean;
+  notify: (type: 'success' | 'error' | 'info' | 'warning', title: string, message?: string) => void;
 }
 
 export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
@@ -53,7 +56,8 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
   onCheckNow,
   onEdit,
   onTogglePause,
-  isChecking = false
+  isChecking = false,
+  notify
 }) => {
   const [timeRange, setTimeRange] = useState<'24h' | '7d' | '30d' | '90d'>('24h');
   const [history, setHistory] = useState<CheckRecord[]>(site.checksHistory);
@@ -115,6 +119,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
   const selectedMetric = metrics[timeRange];
 
   const isPaused = site.status === 'paused';
+  const diagnosticUnavailable = site.status === 'unknown' ? 'Ainda não verificado' : 'Falha na verificação';
 
   return (
     <div className="space-y-4 sm:space-y-5">
@@ -236,7 +241,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
 
         {(site.status === 'offline' || site.status === 'critical') && (
           <div className="px-2.5 py-1 rounded bg-rose-500/20 border border-rose-500/30 text-rose-300 text-xs font-mono">
-            {history[0]?.result || (site.status === 'critical' ? `Erro crítico HTTP ${site.httpStatus}` : 'Falha real de conexão')}
+            {history[0]?.result || (site.status === 'critical' ? 'Falha crítica na verificação' : 'Falha na conexão')}
           </div>
         )}
       </div>
@@ -255,7 +260,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
               site.status === 'warning' || site.status === 'security_blocked' ? 'text-amber-400' :
               site.status === 'offline' || site.status === 'critical' ? 'text-rose-400' : 'text-neutral-400'
             }`}>
-              {site.status}
+              {siteStatusLabel(site.status)}
             </span>
           </div>
         </div>
@@ -267,7 +272,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
           </span>
           <div className="mt-1.5">
             <span className="text-xl font-bold font-mono text-white">
-              {site.uptime30d === null ? 'Sem dados' : site.uptime30dReliable ? `${site.uptime30d.toFixed(2)}%` : `Parcial (${site.uptime30d.toFixed(2)}%)`}
+              {site.uptime30d === null ? 'Sem dados suficientes' : site.uptime30dReliable ? `${site.uptime30d.toFixed(2)}%` : `Parcial (${site.uptime30d.toFixed(2)}%)`}
             </span>
           </div>
         </div>
@@ -279,7 +284,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
           </span>
           <div className="mt-1.5">
             <span className="text-xl font-bold font-mono text-white">
-              {site.responseTime === null ? 'Indisponível' : `${site.responseTime.toFixed(2)}s`}
+              {site.responseTime === null ? responseTimeUnavailableLabel(site) : `${site.responseTime.toFixed(2)}s`}
             </span>
           </div>
         </div>
@@ -293,10 +298,10 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
             <span className={`text-xs font-bold font-mono block ${
               site.sslDaysRemaining !== null && site.sslDaysRemaining <= 15 ? 'text-amber-400' : 'text-neutral-400'
             }`}>
-              {site.sslValid === null ? 'Indisponível' : site.sslValid ? 'Válido' : 'Inválido'}
+              {site.sslValid === null ? sslUnavailableLabel(site) : site.sslValid ? 'Válido' : 'Inválido'}
             </span>
             <span className="text-[10px] font-mono text-neutral-400">
-              {site.sslDaysRemaining === null ? 'Não foi possível verificar' : `${site.sslDaysRemaining}d restantes`}
+              {site.sslDaysRemaining === null ? sslUnavailableLabel(site) : `${site.sslDaysRemaining}d restantes`}
             </span>
           </div>
         </div>
@@ -308,10 +313,10 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
           </span>
           <div className="mt-1.5">
             <span className="text-xl font-bold font-mono text-white block">
-              {site.domainDaysRemaining === null ? 'Indisponível' : `${site.domainDaysRemaining}d`}
+              {site.domainDaysRemaining === null ? domainUnavailableLabel(site) : `${site.domainDaysRemaining}d`}
             </span>
             <span className="text-[10px] font-mono text-neutral-400">
-              {site.domainDaysRemaining === null ? 'Não foi possível verificar' : 'restantes'}
+              {site.domainDaysRemaining === null ? domainUnavailableLabel(site) : 'restantes'}
             </span>
           </div>
         </div>
@@ -326,7 +331,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
               site.httpStatus === 200 ? 'text-emerald-400' :
               site.httpStatus === 503 || site.httpStatus === 500 ? 'text-rose-400 font-black' : 'text-neutral-300'
             }`}>
-              {site.httpStatus === null ? 'Indisponível' : site.httpStatus === 200 ? '200 OK' : site.httpStatus}
+              {site.httpStatus === null ? 'Ainda não verificado' : site.httpStatus === 200 ? '200 OK' : site.httpStatus}
             </span>
           </div>
         </div>
@@ -360,7 +365,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
             return (
               <div
                 key={idx}
-                title={`${check.timestamp}: ${check.status}`}
+                title={`${check.timestamp}: ${siteStatusLabel(check.status)}`}
                 className={`h-6 flex-1 min-w-[5px] rounded-xs transition-colors cursor-pointer ${bg}`}
               />
             );
@@ -463,7 +468,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
             { label: `Média ${timeRange}`, value: selectedMetric?.avgResponseMs },
             { label: 'Mínimo', value: selectedMetric?.minResponseMs },
             { label: 'Máximo', value: selectedMetric?.maxResponseMs }
-          ].map((metric) => <div key={metric.label} className="p-2 rounded bg-black border border-[#1e1e1e]"><span className="text-[9px] font-mono text-neutral-500 uppercase">{metric.label}</span><strong className="text-xs font-mono text-neutral-200 block mt-0.5">{metric.value === null || metric.value === undefined ? 'Sem dados' : `${Math.round(Number(metric.value))} ms`}</strong></div>)}
+          ].map((metric) => <div key={metric.label} className="p-2 rounded bg-black border border-[#1e1e1e]"><span className="text-[9px] font-mono text-neutral-500 uppercase">{metric.label}</span><strong className="text-xs font-mono text-neutral-200 block mt-0.5">{metric.value === null || metric.value === undefined ? 'Sem dados suficientes' : `${Math.round(Number(metric.value))} ms`}</strong></div>)}
         </div>
         {selectedMetric?.totalChecks ? <p className="text-[9px] font-mono text-neutral-600">{selectedMetric.hasFullWindow ? 'Janela histórica completa.' : 'Histórico parcial; a janela selecionada ainda não está totalmente coberta.'} {selectedMetric.totalChecks} checks elegíveis.</p> : null}
       </div>
@@ -479,7 +484,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
               </h3>
             </div>
             <p className="text-[10px] text-neutral-400 mt-0.5 font-mono">
-              Última análise HTML: <strong className="text-neutral-200">{site.tracking?.lastCheckedAt ? new Date(site.tracking.lastCheckedAt).toLocaleString('pt-BR') : 'Sem dados'}</strong>. Detecção não confirma funcionamento da tag.
+              Última análise HTML: <strong className="text-neutral-200">{site.tracking?.lastCheckedAt ? new Date(site.tracking.lastCheckedAt).toLocaleString('pt-BR') : 'Ainda não verificado'}</strong>. Detecção não confirma funcionamento da tag.
             </p>
           </div>
 
@@ -505,7 +510,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
             const toolRes = site.tracking?.results?.[key as keyof typeof site.tracking.results];
             const toolConfig = site.tracking?.[key as 'ga4' | 'gtm' | 'googleAds' | 'metaPixel' | 'searchConsole'];
             const status = toolRes?.status || 'gray';
-            const statusLabel = toolRes?.statusLabel || (toolConfig?.enabled ? 'Não verificado' : 'Não configurado');
+            const statusLabel = toolRes?.statusLabel || (toolConfig?.enabled ? 'Ainda não verificado' : 'Não configurado');
             const displayId = toolRes?.foundId || toolRes?.expectedId || toolConfig?.expectedId;
 
             return (
@@ -559,7 +564,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
                 <div className="mt-2 pt-1.5 border-t border-[#161616]">
                   {key === 'searchConsole' ? (
                     <span className="text-[10px] font-mono text-neutral-400 block truncate">
-                      {toolConfig?.enabled ? 'Configurado; não verificado' : 'Não configurado'}
+                      {toolConfig?.enabled ? 'Configurado; ainda não verificado' : 'Não configurado'}
                     </span>
                   ) : status === 'gray' ? (
                     <span className="text-[10px] font-mono text-neutral-600 block">
@@ -608,15 +613,15 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
             </div>
             <div className="p-2 rounded bg-[#000000] border border-[#1e1e1e] flex items-center justify-between">
               <span className="text-neutral-400">Tempo de resposta:</span>
-              <span className="text-emerald-400 font-mono font-medium">Registrado</span>
+              <span className="text-emerald-400 font-mono font-medium">{site.monitorResponseTime ? 'Configurado' : 'Não configurado'}</span>
             </div>
             <div className="p-2 rounded bg-[#000000] border border-[#1e1e1e] flex items-center justify-between">
               <span className="text-neutral-400">Certificado SSL:</span>
-              <span className="text-neutral-300 font-mono font-medium">{site.ssl?.applicable === false ? 'Não aplicável (HTTP)' : site.sslValid === null ? 'Informação indisponível' : site.sslValid ? `Válido (${site.sslDaysRemaining}d)` : 'Inválido'}</span>
+              <span className="text-neutral-300 font-mono font-medium">{site.sslValid === null ? sslUnavailableLabel(site) : site.sslValid ? `Válido (${site.sslDaysRemaining}d)` : 'Inválido'}</span>
             </div>
             <div className="p-2 rounded bg-[#000000] border border-[#1e1e1e] flex items-center justify-between">
               <span className="text-neutral-400">Domínio RDAP:</span>
-              <span className="text-neutral-300 font-mono font-medium">{site.domainInfo?.status === 'available' ? `${site.domainDaysRemaining ?? '—'}d` : 'Informação indisponível'}</span>
+              <span className="text-neutral-300 font-mono font-medium">{site.domainInfo?.status === 'available' ? `${site.domainDaysRemaining ?? '—'}d` : domainUnavailableLabel(site)}</span>
             </div>
           </div>
         </div>
@@ -633,13 +638,13 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
               <div className="p-2 rounded bg-[#000000] border border-[#1e1e1e] font-mono text-xs text-neutral-300 flex items-center justify-between">
                 <span>"{site.expectedContentText}"</span>
                 <span className={`text-[9px] px-1.5 py-0.2 rounded bg-[#161616] ${history[0]?.expectedContentFound === true ? 'text-emerald-400' : history[0]?.expectedContentFound === false ? 'text-rose-400' : 'text-neutral-400'}`}>
-                  {history[0]?.expectedContentFound === true ? 'Encontrado' : history[0]?.expectedContentFound === false ? 'Não encontrado' : 'Sem resultado'}
+                  {history[0]?.expectedContentFound === true ? 'Encontrado' : history[0]?.expectedContentFound === false ? 'Não encontrado' : history.length === 0 ? 'Ainda não verificado' : 'Falha na verificação'}
                 </span>
               </div>
             </div>
           ) : (
             <p className="text-[11px] text-neutral-500 py-1 font-mono">
-              Verificação de conteúdo desativada para este site.
+              Não configurado para este site.
             </p>
           )}
         </div>
@@ -648,26 +653,28 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
         <div className="p-3 rounded bg-[#0a0a0a] border border-[#1e1e1e] text-[10px] font-mono space-y-1">
           <strong className="text-neutral-300 uppercase">DNS / IP real</strong>
-          <p className="text-neutral-500">IP observado: <span className="text-neutral-300">{site.dns?.observedIp || history[0]?.observedIp || 'Informação indisponível'}</span></p>
-          <p className="text-neutral-500">A: <span className="text-neutral-300">{site.dns?.a?.join(', ') || 'Informação indisponível'}</span></p>
-          <p className="text-neutral-500">AAAA: <span className="text-neutral-300">{site.dns?.aaaa?.join(', ') || 'Informação indisponível'}</span></p>
-          <p className="text-neutral-500">CNAME: <span className="text-neutral-300">{site.dns?.cname?.join(', ') || 'Informação indisponível'}</span></p>
+          <p className="text-neutral-500">IP observado: <span className="text-neutral-300">{site.dns?.observedIp || history[0]?.observedIp || diagnosticUnavailable}</span></p>
+          <p className="text-neutral-500">A: <span className="text-neutral-300">{site.dns?.a?.join(', ') || diagnosticUnavailable}</span></p>
+          <p className="text-neutral-500">AAAA: <span className="text-neutral-300">{site.dns?.aaaa?.join(', ') || diagnosticUnavailable}</span></p>
+          <p className="text-neutral-500">CNAME: <span className="text-neutral-300">{site.dns?.cname?.join(', ') || diagnosticUnavailable}</span></p>
         </div>
         <div className="p-3 rounded bg-[#0a0a0a] border border-[#1e1e1e] text-[10px] font-mono space-y-1">
           <strong className="text-neutral-300 uppercase">Certificado TLS</strong>
-          <p className="text-neutral-500">Hostname: <span className="text-neutral-300">{site.ssl?.hostnameValid === true ? 'Válido' : site.ssl?.hostnameValid === false ? 'Inválido' : 'Não aplicável/indisponível'}</span></p>
-          <p className="text-neutral-500">Emissor: <span className="text-neutral-300">{site.ssl?.issuer || 'Informação indisponível'}</span></p>
-          <p className="text-neutral-500">Válido de: <span className="text-neutral-300">{site.ssl?.validFrom ? new Date(site.ssl.validFrom).toLocaleDateString('pt-BR') : 'Informação indisponível'}</span></p>
-          <p className="text-neutral-500">Válido até: <span className="text-neutral-300">{site.ssl?.validTo ? new Date(site.ssl.validTo).toLocaleDateString('pt-BR') : 'Informação indisponível'}</span></p>
+          <p className="text-neutral-500">Hostname: <span className="text-neutral-300">{site.ssl?.hostnameValid === true ? 'Válido' : site.ssl?.hostnameValid === false ? 'Inválido' : sslUnavailableLabel(site)}</span></p>
+          <p className="text-neutral-500">Emissor: <span className="text-neutral-300">{site.ssl?.issuer || sslUnavailableLabel(site)}</span></p>
+          <p className="text-neutral-500">Válido de: <span className="text-neutral-300">{site.ssl?.validFrom ? new Date(site.ssl.validFrom).toLocaleDateString('pt-BR') : sslUnavailableLabel(site)}</span></p>
+          <p className="text-neutral-500">Válido até: <span className="text-neutral-300">{site.ssl?.validTo ? new Date(site.ssl.validTo).toLocaleDateString('pt-BR') : sslUnavailableLabel(site)}</span></p>
         </div>
         <div className="p-3 rounded bg-[#0a0a0a] border border-[#1e1e1e] text-[10px] font-mono space-y-1">
           <strong className="text-neutral-300 uppercase">Domínio / WordPress</strong>
-          <p className="text-neutral-500">Registrador: <span className="text-neutral-300">{site.domainInfo?.registrar || 'Informação indisponível'}</span></p>
-          <p className="text-neutral-500">Expiração: <span className="text-neutral-300">{site.domainInfo?.expiresAt || site.domainInfo?.expires_at_registry ? new Date(site.domainInfo.expiresAt || site.domainInfo.expires_at_registry).toLocaleDateString('pt-BR') : 'Informação indisponível'}</span></p>
-          <p className="text-neutral-500">WordPress: <span className="text-neutral-300">{site.wordpress?.detected ? 'Detectado' : site.isWordPress ? 'Configurado; sem evidência' : 'Não detectado'}</span></p>
+          <p className="text-neutral-500">Registrador: <span className="text-neutral-300">{site.domainInfo?.registrar || domainUnavailableLabel(site)}</span></p>
+          <p className="text-neutral-500">Expiração: <span className="text-neutral-300">{site.domainInfo?.expiresAt || site.domainInfo?.expires_at_registry ? new Date(site.domainInfo.expiresAt || site.domainInfo.expires_at_registry).toLocaleDateString('pt-BR') : domainUnavailableLabel(site)}</span></p>
+          <p className="text-neutral-500">WordPress: <span className="text-neutral-300">{site.wordpress?.detected ? 'Detectado' : site.isWordPress ? 'Configurado; sem evidência na última verificação' : 'Não configurado'}</span></p>
           <p className="text-neutral-500">Admin básico: <span className="text-neutral-300">{site.wordpress?.administrativeAvailable === true ? 'Acessível/protegido' : site.wordpress?.administrativeAvailable === false ? 'Indisponível' : 'Não aplicável'}</span></p>
         </div>
       </div>
+
+      <SiteTechnicalAccesses site={site} notify={notify} />
 
       {/* Tabela: Últimas Verificações - High Density */}
       <div className="space-y-2.5">
@@ -733,7 +740,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
                         {check.status === 'critical' && (
                           <span className="text-rose-400 font-bold flex items-center gap-1.5">
                             <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
-                            Crítico
+                            Falha crítica
                           </span>
                         )}
                         {check.status === 'security_blocked' && (
@@ -745,10 +752,17 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
                       </td>
                       <td className="py-2.5 px-3 text-neutral-200 font-bold">{check.httpCode}</td>
                       <td className="py-2.5 px-3 text-neutral-300">
-                        {check.responseTime > 0 ? `${check.responseTime.toFixed(2)}s` : '-'}
+                        {check.responseTime > 0 ? `${check.responseTime.toFixed(2)}s` : check.status === 'security_blocked' ? 'Não aplicável' : check.status === 'offline' || check.status === 'critical' ? 'Indisponível' : 'Falha na verificação'}
                       </td>
                       <td className="py-2.5 px-3 font-sans text-neutral-300">
-                        {check.result}
+                        <span className="block">{check.result}</span>
+                        {(check.errorType || check.errorMessage) && (
+                          <details className="mt-1 text-[9px] text-neutral-500">
+                            <summary className="cursor-pointer hover:text-neutral-300">Detalhes técnicos</summary>
+                            {check.errorType && <span className="block mt-1">Código: {check.errorType}</span>}
+                            {check.errorMessage && <span className="block break-words">Mensagem: {check.errorMessage}</span>}
+                          </details>
+                        )}
                       </td>
                       <td className="py-2.5 px-3 text-neutral-400">
                         {check.incidentId ? <span className="text-[9px] px-1.5 py-0.5 rounded bg-rose-950/30 border border-rose-900/50 text-rose-300">Relacionado</span> : '—'}

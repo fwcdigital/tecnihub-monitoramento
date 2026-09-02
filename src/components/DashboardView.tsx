@@ -23,6 +23,7 @@ import {
   Globe
 } from 'lucide-react';
 import { Site, Incident, SiteStatus } from '../types';
+import { domainUnavailableLabel, responseTimeUnavailableLabel, sslUnavailableLabel } from '../utils/diagnosticLabels';
 
 interface DashboardViewProps {
   sites: Site[];
@@ -234,7 +235,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             Uptime Médio
           </span>
           <div className="mt-1.5 flex items-baseline justify-between">
-            <span className="text-xl sm:text-2xl font-bold font-mono text-white">{avgUptime === null ? 'Sem dados' : `${avgUptime}%`}</span>
+            <span className="text-xl sm:text-2xl font-bold font-mono text-white">{avgUptime === null ? 'Sem dados suficientes' : `${avgUptime}%`}</span>
             <span className="text-[9px] font-mono text-neutral-500">30 dias</span>
           </div>
         </div>
@@ -245,7 +246,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             Tempo Resposta
           </span>
           <div className="mt-1.5 flex items-baseline justify-between">
-            <span className="text-xl sm:text-2xl font-bold font-mono text-white">{avgResponseTime === null ? 'Sem dados' : `${avgResponseTime}s`}</span>
+            <span className="text-xl sm:text-2xl font-bold font-mono text-white">{avgResponseTime === null ? 'Sem dados suficientes' : `${avgResponseTime}s`}</span>
             <span className="text-[9px] font-mono text-neutral-500">Média</span>
           </div>
         </div>
@@ -266,7 +267,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                     Alerta Crítico Operacional
                   </span>
                   <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-rose-500 text-white font-bold">
-                    HTTP {offlineSite.httpStatus ?? 'Indisponível'}
+                    Falha confirmada
                   </span>
                 </div>
                 <h3 className="text-sm font-semibold text-white mt-0.5">
@@ -321,7 +322,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </div>
 
           <span className="text-[10px] font-mono text-neutral-500">
-            Último check: {latestGlobalCheck?.timestamp || 'Sem dados suficientes'}
+            Último check: {latestGlobalCheck?.timestamp || 'Ainda não verificado'}
           </span>
         </div>
       </div>
@@ -496,13 +497,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                             )}
                             {site.status === 'security_blocked' && (
                               <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-neutral-400 font-mono">
-                                <span className="w-1.5 h-1.5 rounded-full bg-neutral-500" /> Segurança
+                                <span className="w-1.5 h-1.5 rounded-full bg-neutral-500" /> Verificação bloqueada
                               </span>
                             )}
                             {site.status === 'critical' && (
                               <span className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-rose-400 font-mono">
                                 <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
-                                Crítico ({site.httpStatus})
+                                Falha crítica
                               </span>
                             )}
                             {site.status === 'paused' && (
@@ -514,7 +515,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                             {site.status === 'unknown' && (
                               <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-neutral-500 font-mono">
                                 <span className="w-1.5 h-1.5 rounded-full bg-neutral-600" />
-                                Sem dados
+                                Status ainda não confirmado
                               </span>
                             )}
                           </td>
@@ -522,14 +523,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           {/* Uptime */}
                           <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
                             <span className={site.uptime30d !== null && site.uptime30d < 99.0 ? 'text-amber-400 font-bold' : 'text-neutral-200'}>
-                              {site.uptime30d === null ? 'Sem dados' : site.uptime30dReliable ? `${site.uptime30d.toFixed(2)}%` : `Parcial (${site.uptime30d.toFixed(2)}%)`}
+                              {site.uptime30d === null ? 'Sem dados suficientes' : site.uptime30dReliable ? `${site.uptime30d.toFixed(2)}%` : `Parcial (${site.uptime30d.toFixed(2)}%)`}
                             </span>
                           </td>
 
                           {/* Resposta */}
                           <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
                             {isOffline || site.responseTime === null ? (
-                              <span className="text-neutral-500">-</span>
+                              <span className="text-neutral-500">{responseTimeUnavailableLabel(site)}</span>
                             ) : (
                               <span className={site.responseTime > 3.0 ? 'text-amber-400 font-bold' : 'text-neutral-200'}>
                                 {site.responseTime.toFixed(2)}s
@@ -540,14 +541,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                           {/* SSL */}
                           <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
                             <span className={site.sslDaysRemaining !== null && site.sslDaysRemaining <= 15 ? 'text-amber-400 font-bold' : 'text-neutral-400'}>
-                              {site.sslDaysRemaining === null ? 'Indisponível' : `${site.sslDaysRemaining}d`}
+                              {site.sslDaysRemaining === null ? sslUnavailableLabel(site) : `${site.sslDaysRemaining}d`}
                             </span>
                           </td>
 
                           {/* Domínio */}
                           <td className="py-2.5 px-3 font-mono text-[11px] whitespace-nowrap">
                             <span className={site.domainDaysRemaining !== null && site.domainDaysRemaining <= 15 ? 'text-amber-400 font-bold' : 'text-neutral-400'}>
-                              {site.domainDaysRemaining === null ? 'Indisponível' : `${site.domainDaysRemaining}d`}
+                              {site.domainDaysRemaining === null ? domainUnavailableLabel(site) : `${site.domainDaysRemaining}d`}
                             </span>
                           </td>
 
