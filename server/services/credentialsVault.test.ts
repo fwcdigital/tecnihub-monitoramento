@@ -132,6 +132,18 @@ describe('criptografia e autorização do cofre', () => {
     assert.equal(validateMasterPasswordHashFormat(`${hash}$extra`), false);
   });
 
+  it('normaliza exclusivamente separadores de hash escapados pelo runtime', async () => {
+    const password = 'Senha-Mestre-Correta-123!';
+    const hash = await hashMasterPassword(password);
+    const escapedHash = hash.replaceAll('$', '\\$');
+
+    assert.equal(escapedHash.length, hash.length + 5);
+    assert.equal(escapedHash.split('$').length, 6);
+    assert.equal(validateMasterPasswordHashFormat(escapedHash), true);
+    assert.equal(await verifyMasterPassword(password, escapedHash), true);
+    assert.equal(validateMasterPasswordHashFormat(escapedHash.replace('\\$', '\\\\$')), false);
+  });
+
   it('expira a autorização privilegiada e a vincula ao administrador', () => {
     let now = Date.parse('2026-09-01T12:00:00.000Z');
     const options = { secret: SESSION_SECRET, secure: false, ttlSeconds: 300, now: () => now };

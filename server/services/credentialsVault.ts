@@ -108,7 +108,7 @@ function normalizeMasterPasswordHash(storedHash: string): string {
   const hasMatchingQuotes = (normalized.startsWith('"') && normalized.endsWith('"'))
     || (normalized.startsWith("'") && normalized.endsWith("'"));
   if (hasMatchingQuotes) normalized = normalized.slice(1, -1).trim();
-  return normalized;
+  return normalized.replaceAll('\\$', '$');
 }
 
 export function validateMasterPasswordHashFormat(storedHash: string): boolean {

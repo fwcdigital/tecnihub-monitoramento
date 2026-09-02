@@ -145,26 +145,7 @@ export function assertSecureProductionConfiguration(env: NodeJS.ProcessEnv = pro
     throw new Error('CREDENTIALS_ENCRYPTION_KEY é obrigatória em produção e deve representar exatamente 32 bytes.');
   }
 
-  const masterPasswordHash = env.CREDENTIALS_MASTER_PASSWORD_HASH;
-  const trimmedMasterPasswordHash = masterPasswordHash?.trim() || '';
-  const hasMatchingExternalQuotes = trimmedMasterPasswordHash.length >= 2 && (
-    (trimmedMasterPasswordHash.startsWith('"') && trimmedMasterPasswordHash.endsWith('"'))
-    || (trimmedMasterPasswordHash.startsWith("'") && trimmedMasterPasswordHash.endsWith("'"))
-  );
-  const masterPasswordHashIsValid = validateMasterPasswordHashFormat(masterPasswordHash || '');
-  // TEMPORARY: safe startup metadata only. Remove after the Hostinger runtime
-  // representation has been identified. Never add the value or hash fragments.
-  console.info('[Vault Startup Diagnostic]', {
-    exists: typeof masterPasswordHash === 'string',
-    length: masterPasswordHash?.length || 0,
-    startsWithScryptV1: masterPasswordHash?.startsWith('scrypt-v1$') || false,
-    segmentCount: typeof masterPasswordHash === 'string' ? masterPasswordHash.split('$').length : 0,
-    hasExternalWhitespace: typeof masterPasswordHash === 'string' && masterPasswordHash !== trimmedMasterPasswordHash,
-    hasExternalQuotes: hasMatchingExternalQuotes,
-    validFormat: masterPasswordHashIsValid
-  });
-
-  if (!masterPasswordHashIsValid) {
+  if (!validateMasterPasswordHashFormat(env.CREDENTIALS_MASTER_PASSWORD_HASH || '')) {
     throw new Error('CREDENTIALS_MASTER_PASSWORD_HASH é obrigatório em produção e deve ser gerado pelo script administrativo.');
   }
 
