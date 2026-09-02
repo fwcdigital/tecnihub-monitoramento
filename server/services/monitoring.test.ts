@@ -7,7 +7,7 @@ import { classifyHttpStatus, detectTrackingEvidence, executeHttpCheck } from './
 import { validateUrlForSSRF } from './ssrfProtection';
 import { determineIncidentTransition, processSiteCheck } from './siteCheckService';
 import { isSiteDue, runMonitoringCycle } from './monitoringScheduler';
-import { buildEvents } from './webhookAlertService';
+import { buildEvents, queueMonitoringAlerts } from './webhookAlertService';
 import { mapDbIncidentToIncident, mapDbSiteToSite } from '../../src/services/siteService';
 import { diagnosticTypeLabel } from '../../src/utils/diagnosticLabels';
 import type { DbCheck, DbSite } from '../../src/types';
@@ -515,6 +515,63 @@ describe('SSL, DNS e alertas controlados', () => {
     assert.equal(events.length, 1);
     assert.equal(events[0].type, 'dns_changed');
     assert.match(events[0].key, /93\.184\.216\.34:93\.184\.216\.35/);
+  });
+
+  it('mantém alertas duráveis na fila para entrega síncrona pelo cron', async () => {
+    let queuedRows: Array<Record<string, unknown>> = [];
+    const supabase = {
+      from(table: string) {
+        if (table === 'checks') return {
+          select: () => ({
+            eq: () => ({
+              not: () => ({
+                order: () => ({ limit: async () => ({ data: [], error: null }) })
+              })
+            })
+          })
+        };
+        if (table === 'alert_webhooks') return {
+          select: () => ({
+            eq: async () => ({
+              data: [{
+                id: 'webhook-1', url: 'https://alerts.example', timeout_ms: 5000,
+                event_types: ['incident_confirmed']
+              }],
+              error: null
+            })
+          })
+        };
+        if (table === 'alert_deliveries') return {
+          async upsert(rows: Array<Record<string, unknown>>) {
+            queuedRows = rows;
+            return { error: null };
+          }
+        };
+        throw new Error(`Tabela inesperada: ${table}`);
+      }
+    } as any;
+    const queued = await queueMonitoringAlerts(
+      supabase,
+      { id: 'site-1', name: 'Site', url: 'https://site.example', is_active: true },
+      {
+        success: true,
+        siteId: 'site-1',
+        url: 'https://site.example',
+        checkedAt: '2026-09-02T12:00:00.000Z',
+        checkId: 'check-3',
+        incidentId: 'incident-1',
+        incidentTransition: 'opened',
+        result: {
+          status: 'offline', httpStatus: null, responseTime: 10000,
+          finalUrl: 'https://site.example', errorType: 'TIMEOUT',
+          resultMessage: 'Offline', redirectCount: 0, incidentEligible: true
+        }
+      }
+    );
+    assert.equal(queued, 1);
+    assert.equal(queuedRows.length, 1);
+    assert.equal(queuedRows[0].event_type, 'incident_confirmed');
+    assert.equal(queuedRows[0].event_key, 'incident:incident-1:confirmed');
   });
 });
 

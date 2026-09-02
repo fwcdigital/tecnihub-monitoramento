@@ -375,15 +375,10 @@ function AdminApp() {
     setIsCheckingAll(true);
     try {
       const response = await checkAllSitesNow();
-      try {
-        await reloadOperationalData();
-      } catch (reloadError) {
-        console.error('Varredura persistida, mas a atualização da tela falhou:', reloadError);
-      }
       addToast(
-        response.totalFailed > 0 ? 'warning' : 'success',
-        'Varredura global finalizada',
-        `${response.totalChecked || 0} sites verificados; ${response.totalFailed || 0} falha(s) isolada(s).`
+        'success',
+        'Sites colocados na fila',
+        response.message
       );
     } catch (err: any) {
       console.error('Erro na varredura global:', err);

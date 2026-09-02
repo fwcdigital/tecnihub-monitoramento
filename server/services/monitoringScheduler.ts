@@ -10,9 +10,24 @@ const INTERVAL_MS: Record<string, number> = {
   daily: 24 * 60 * 60_000
 };
 
-export const MAX_SCHEDULER_CONCURRENCY = 5;
-export const DEFAULT_SCHEDULER_CLAIM_LIMIT = 100;
+export const DEFAULT_MONITOR_CRON_BATCH_SIZE = 5;
+export const MAX_MONITOR_CRON_BATCH_SIZE = 10;
+export const DEFAULT_MONITOR_CRON_CONCURRENCY = 5;
+export const MAX_MONITOR_CRON_CONCURRENCY = 10;
 const SCHEDULER_LOCK_KEY = 'tecnihub-primary-monitor';
+
+function boundedPositiveInteger(value: unknown, fallback: number, maximum: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, maximum) : fallback;
+}
+
+export function resolveMonitorCronBatchSize(value: unknown): number {
+  return boundedPositiveInteger(value, DEFAULT_MONITOR_CRON_BATCH_SIZE, MAX_MONITOR_CRON_BATCH_SIZE);
+}
+
+export function resolveMonitorCronConcurrency(value: unknown): number {
+  return boundedPositiveInteger(value, DEFAULT_MONITOR_CRON_CONCURRENCY, MAX_MONITOR_CRON_CONCURRENCY);
+}
 
 export function isSupportedCheckInterval(checkInterval: unknown): checkInterval is keyof typeof INTERVAL_MS {
   return typeof checkInterval === 'string' && Object.hasOwn(INTERVAL_MS, checkInterval);
@@ -35,14 +50,21 @@ export interface MonitoringCycleResult {
   concurrency: number;
 }
 
+export interface MonitoringCycleDependencies {
+  processCheck?: typeof processSiteCheck;
+}
+
 export async function runMonitoringCycle(
   supabase: SupabaseClient,
-  concurrency = MAX_SCHEDULER_CONCURRENCY,
+  concurrency = DEFAULT_MONITOR_CRON_CONCURRENCY,
   nowMs = Date.now(),
   triggerType: 'cron' | 'manual' | 'batch' = 'cron',
-  claimLimit = DEFAULT_SCHEDULER_CLAIM_LIMIT
+  claimLimit = DEFAULT_MONITOR_CRON_BATCH_SIZE,
+  dependencies: MonitoringCycleDependencies = {}
 ): Promise<MonitoringCycleResult> {
-  const effectiveConcurrency = Math.max(1, Math.min(MAX_SCHEDULER_CONCURRENCY, Math.floor(concurrency) || 1));
+  const effectiveClaimLimit = resolveMonitorCronBatchSize(claimLimit);
+  const effectiveConcurrency = Math.min(resolveMonitorCronConcurrency(concurrency), effectiveClaimLimit);
+  const processCheck = dependencies.processCheck || processSiteCheck;
   const { data: lockData, error: lockError } = await supabase.rpc('claim_monitoring_run', {
     p_lock_key: SCHEDULER_LOCK_KEY,
     p_trigger_type: triggerType,
@@ -65,7 +87,7 @@ export async function runMonitoringCycle(
     const { data: dueSites, error: dueError } = await supabase.rpc('claim_due_monitoring_sites', {
       p_run_id: runId,
       p_owner_token: ownerToken,
-      p_limit: Math.max(1, Math.min(500, Math.floor(claimLimit) || DEFAULT_SCHEDULER_CLAIM_LIMIT)),
+      p_limit: effectiveClaimLimit,
       p_now: new Date(nowMs).toISOString()
     });
     if (dueError) throw new Error(`Falha ao reservar sites vencidos: ${dueError.message}`);
@@ -73,7 +95,7 @@ export async function runMonitoringCycle(
     claimed = sites.length;
     const results = await mapWithConcurrency(sites, effectiveConcurrency, async (site) => {
       try {
-        await processSiteCheck({ siteId: site.id, trustedSite: site, runId }, { supabase });
+        await processCheck({ siteId: site.id, trustedSite: site, runId }, { supabase });
         return true;
       } catch (error) {
         console.error(

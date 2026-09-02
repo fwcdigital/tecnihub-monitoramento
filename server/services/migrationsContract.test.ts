@@ -41,6 +41,14 @@ describe('contratos das migrations finais', () => {
     assert.match(monitoringSql, /next_check_at\s*=\s*CASE[\s\S]+p_checked_at\s*\+\s*public\.monitor_interval_value/i);
   });
 
+  it('claim é atômico, prioriza atraso e permite recuperação após o lease expirar', () => {
+    assert.match(monitoringSql, /ORDER BY s\.next_check_at NULLS FIRST, s\.id/i);
+    assert.match(monitoringSql, /monitoring_claimed_until IS NULL OR s\.monitoring_claimed_until <= p_now/i);
+    assert.match(monitoringSql, /SET monitoring_claimed_by = p_run_id,[\s\S]+monitoring_claimed_until = p_now \+ interval '15 minutes'/i);
+    assert.match(monitoringSql, /FOR UPDATE SKIP LOCKED/i);
+    assert.match(monitoringSql, /SET monitoring_claimed_by = NULL, monitoring_claimed_until = NULL[\s\S]+WHERE monitoring_claimed_by = p_run_id/i);
+  });
+
   it('métricas cobrem uptime e response time em 24h, 7d, 30d e período sem dados', () => {
     for (const period of ["'24h'", "'7d'", "'30d'", "'90d'"]) assert.match(monitoringSql, new RegExp(period));
     assert.match(monitoringSql, /'uptimePercent'/);

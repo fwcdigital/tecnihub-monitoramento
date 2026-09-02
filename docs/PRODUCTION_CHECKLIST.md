@@ -32,35 +32,34 @@ Configurar, sem prefixo `VITE_`:
 - `MONITOR_CRON_SECRET`
 - `CREDENTIALS_ENCRYPTION_KEY`
 - `CREDENTIALS_MASTER_PASSWORD_HASH`
-- `CHECK_CONCURRENCY`
+- `MONITOR_CRON_BATCH_SIZE` (padrão 5)
+- `MONITOR_CRON_CONCURRENCY` (padrão 5)
 
 Não há variável de e-mail: SMTP/provedor não foi implementado. O webhook é
 configurado pela área administrativa depois que a migration 004 estiver aplicada.
 
-## 3. Hostinger Cron
+## 3. Cron externo
 
-No hPanel, acesse **Websites → Dashboard → Advanced → Cron Jobs**, escolha **Custom**
-e configure:
+No cron-job.org (ou agendador equivalente), configure:
 
-- frequência: a cada cinco minutos (`*/5 * * * *`);
-- horário: UTC+0 no hPanel;
+- frequência: a cada minuto;
 - método: `POST`;
 - endpoint: `https://<DOMINIO-DO-MONITOR>/api/internal/monitor/run`;
 - autenticação: `Authorization: Bearer <MONITOR_CRON_SECRET>`;
-- timeout: 60 segundos.
+- timeout: 30 segundos.
 
 Comando exato, somente com placeholders:
 
 ```sh
-curl --fail --silent --show-error --max-time 60 --request POST --header 'Authorization: Bearer <MONITOR_CRON_SECRET>' 'https://<DOMINIO-DO-MONITOR>/api/internal/monitor/run'
+curl --fail --silent --show-error --max-time 30 --request POST --header 'Authorization: Bearer <MONITOR_CRON_SECRET>' 'https://<DOMINIO-DO-MONITOR>/api/internal/monitor/run'
 ```
 
-Teste o comando manualmente após o deploy e depois use **View Output** no hPanel.
-O retorno `200` indica ciclo adquirido; `202` indica que outro lease válido já está
-executando e não é falha. Nunca coloque o valor real do segredo no Git ou em URL.
+Teste o comando manualmente após o deploy e inspecione o histórico no cron-job.org.
+O retorno `200` traz o lote processado; `overlappingRun: true` indica que outra
+execução possui o lease e não é falha. Nunca coloque o valor real do segredo no Git ou em URL.
 
-Referências oficiais: <https://www.hostinger.com/support/1583465-how-to-set-up-a-cron-job-at-hostinger/>
-e <https://www.hostinger.com/support/5647075-how-to-check-the-output-of-a-cron-job-at-hostinger/>.
+Cada chamada processa no máximo `MONITOR_CRON_BATCH_SIZE` sites. A continuidade
+depende somente de `next_check_at`, claims persistidos no Supabase e chamadas futuras do cron.
 
 ## 4. Cofre
 

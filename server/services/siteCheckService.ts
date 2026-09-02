@@ -6,7 +6,7 @@ import {
   HttpCheckOptions,
   DEFAULT_TIMEOUT_MS
 } from './httpChecker';
-import { processPendingWebhookDeliveries, queueMonitoringAlerts } from './webhookAlertService';
+import { queueMonitoringAlerts } from './webhookAlertService';
 
 export interface SiteRecordForCheck {
   id: string;
@@ -270,9 +270,6 @@ export async function processSiteCheck(
   };
   if (site && dependencies.supabase) {
     await queueMonitoringAlerts(dependencies.supabase, site, processed).catch(() => 0);
-    // Delivery happens after the durable check/queue write and never delays the
-    // monitoring result. Pending rows are retried by subsequent cron runs.
-    void processPendingWebhookDeliveries(dependencies.supabase).catch(() => undefined);
   }
   return processed;
 }

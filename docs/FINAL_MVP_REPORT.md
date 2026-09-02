@@ -87,18 +87,19 @@ RLS/RPCs/CRUD/check/métricas/cofre → reativar cron. Nunca reaplicar `schema.s
 `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`,
 `ADMIN_SESSION_SECRET`, `ADMIN_SESSION_TTL_SECONDS`, `ALLOWED_ORIGINS`, `TRUST_PROXY`,
 `MONITOR_CRON_SECRET`, `CREDENTIALS_ENCRYPTION_KEY`,
-`CREDENTIALS_MASTER_PASSWORD_HASH`, `CHECK_CONCURRENCY`, `PORT` e `NODE_ENV`.
+`CREDENTIALS_MASTER_PASSWORD_HASH`, `MONITOR_CRON_BATCH_SIZE`,
+`MONITOR_CRON_CONCURRENCY`, `PORT` e `NODE_ENV`.
 Somente placeholders existem em `.env.example`; nenhuma variável usa `VITE_`.
 
 ## J. Configuração do cron Hostinger
 
-Tipo Custom, frequência `*/5 * * * *` em UTC+0, POST, timeout 60 s:
+Cron externo a cada minuto, método POST e timeout 30 s:
 
 ```sh
-curl --fail --silent --show-error --max-time 60 --request POST --header 'Authorization: Bearer <MONITOR_CRON_SECRET>' 'https://<DOMINIO-DO-MONITOR>/api/internal/monitor/run'
+curl --fail --silent --show-error --max-time 30 --request POST --header 'Authorization: Bearer <MONITOR_CRON_SECRET>' 'https://<DOMINIO-DO-MONITOR>/api/internal/monitor/run'
 ```
 
-Detalhes e validação por **View Output** estão em `docs/PRODUCTION_CHECKLIST.md`.
+Cada chamada processa um único lote persistido; detalhes estão em `docs/PRODUCTION_CHECKLIST.md`.
 
 ## K. Configurações manuais do Supabase
 

@@ -16,11 +16,15 @@ import {
   validateSessionSecret,
   verifyAdminSessionCookie
 } from './services/adminSession';
-import { mapWithConcurrency } from './services/concurrency';
 import { LoginRateLimiter } from './services/loginRateLimiter';
 import { normalizeHttpUrl, validateUrlForSSRF } from './services/ssrfProtection';
-import { processSiteCheck, SiteCheckError, SiteRecordForCheck } from './services/siteCheckService';
-import { isSupportedCheckInterval, runMonitoringCycle } from './services/monitoringScheduler';
+import { processSiteCheck, SiteCheckError } from './services/siteCheckService';
+import {
+  isSupportedCheckInterval,
+  resolveMonitorCronBatchSize,
+  resolveMonitorCronConcurrency,
+  runMonitoringCycle
+} from './services/monitoringScheduler';
 import { processPendingWebhookDeliveries } from './services/webhookAlertService';
 import {
   CredentialMetadata,
@@ -44,11 +48,8 @@ import {
 
 dotenv.config();
 
-const configuredConcurrency = Number(process.env.CHECK_CONCURRENCY || 5);
-export const MAX_BATCH_CONCURRENCY = 5;
-export const BATCH_CONCURRENCY = Number.isInteger(configuredConcurrency) && configuredConcurrency > 0
-  ? Math.min(configuredConcurrency, MAX_BATCH_CONCURRENCY)
-  : 5;
+export const MONITOR_CRON_BATCH_SIZE = resolveMonitorCronBatchSize(process.env.MONITOR_CRON_BATCH_SIZE);
+export const MONITOR_CRON_CONCURRENCY = resolveMonitorCronConcurrency(process.env.MONITOR_CRON_CONCURRENCY);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -76,6 +77,8 @@ export interface CreateAppOptions {
   vaultAuthorizationRateLimiter?: LoginRateLimiter;
   vaultRevealRateLimiter?: LoginRateLimiter;
   getCredentialRepository?: () => CredentialRepository | null;
+  runMonitoringCycle?: typeof runMonitoringCycle;
+  processPendingWebhookDeliveries?: typeof processPendingWebhookDeliveries;
 }
 
 function getAllowedOrigins(isProduction: boolean): string[] {
@@ -111,6 +114,20 @@ function sendDatabaseUnavailable(res: Response, isProduction: boolean) {
       : 'Supabase não está configurado no backend com a service role.',
     code: 'DATABASE_UNAVAILABLE'
   });
+}
+
+async function countRemainingDueSites(supabase: SupabaseClient, nowIso: string): Promise<number | null> {
+  try {
+    const { count, error } = await supabase
+      .from('sites')
+      .select('id', { count: 'exact', head: true })
+      .eq('is_active', true)
+      .lte('next_check_at', nowIso)
+      .or(`monitoring_claimed_until.is.null,monitoring_claimed_until.lte.${nowIso}`);
+    return error ? null : count || 0;
+  } catch {
+    return null;
+  }
 }
 
 function publicStatusForSite(site: any, latestCheck: any, activeIncident?: any): 'online' | 'warning' | 'critical' | 'offline' | 'unknown' {
@@ -302,6 +319,8 @@ export function createApp(options: CreateAppOptions = {}) {
     const supabase = getSupabase();
     return supabase ? new SupabaseCredentialRepository(supabase) : null;
   });
+  const runMonitorCycle = options.runMonitoringCycle || runMonitoringCycle;
+  const deliverPendingWebhooks = options.processPendingWebhookDeliveries || processPendingWebhookDeliveries;
 
   app.disable('x-powered-by');
   if (options.trustProxy ?? process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
@@ -440,19 +459,35 @@ export function createApp(options: CreateAppOptions = {}) {
     }
     const supabase = getSupabase();
     if (!supabase) return sendDatabaseUnavailable(res, isProduction);
+    const startedAt = Date.now();
     try {
-      const cycle = await runMonitoringCycle(supabase, BATCH_CONCURRENCY, Date.now(), 'cron');
+      const cycleStartedAt = Date.now();
+      const cycle = await runMonitorCycle(
+        supabase,
+        MONITOR_CRON_CONCURRENCY,
+        cycleStartedAt,
+        'cron',
+        MONITOR_CRON_BATCH_SIZE
+      );
       const alerts = cycle.acquired
-        ? await processPendingWebhookDeliveries(supabase)
+        ? await deliverPendingWebhooks(
+          supabase,
+          MONITOR_CRON_BATCH_SIZE,
+          MONITOR_CRON_CONCURRENCY
+        )
         : { delivered: 0, failed: 0 };
-      return res.status(cycle.acquired ? 200 : 202).json({
+      const remainingDue = await countRemainingDueSites(supabase, new Date().toISOString());
+      return res.status(200).json({
         success: true,
         overlappingRun: !cycle.acquired,
         runId: cycle.runId,
         claimed: cycle.claimed,
         checked: cycle.checked,
         failed: cycle.failed,
+        remainingDue,
+        batchSize: MONITOR_CRON_BATCH_SIZE,
         concurrency: cycle.concurrency,
+        durationMs: Date.now() - startedAt,
         alerts
       });
     } catch (error) {
@@ -1123,11 +1158,15 @@ export function createApp(options: CreateAppOptions = {}) {
 
   app.post('/api/check-site', async (req, res) => {
     try {
+      const supabase = getSupabase();
       const result = await processSiteCheck(
         { siteId: req.body?.siteId, url: req.body?.siteId ? undefined : req.body?.url },
-        { supabase: getSupabase() }
+        { supabase }
       );
-      return res.json(result);
+      const alerts = supabase
+        ? await deliverPendingWebhooks(supabase, 1)
+        : { delivered: 0, failed: 0 };
+      return res.json({ ...result, alerts });
     } catch (error) {
       const mapped = getRequestError(error, isProduction);
       console.error('[HTTP Check Error]', mapped.code, mapped.message);
@@ -1140,45 +1179,20 @@ export function createApp(options: CreateAppOptions = {}) {
       const supabase = getSupabase();
       if (!supabase) return sendDatabaseUnavailable(res, isProduction);
 
-      const { data, error } = await supabase
+      const queuedAt = new Date().toISOString();
+      const { error } = await supabase
         .from('sites')
-        .select([
-          'id', 'url', 'name', 'domain', 'is_active', 'is_wordpress', 'check_interval',
-          'monitor_response_time', 'monitor_ssl', 'monitor_domain',
-          'expected_content', 'expected_ga4_id', 'expected_gtm_id',
-          'expected_google_ads_id', 'expected_meta_pixel_id', 'uses_rd_station'
-        ].join(','))
-        .eq('is_active', true)
-        .limit(500);
+        .update({ next_check_at: queuedAt })
+        .eq('is_active', true);
       if (error) {
-        return res.status(500).json({ error: 'Falha ao carregar sites ativos.', code: 'ACTIVE_SITES_QUERY_FAILED' });
+        return res.status(500).json({ error: 'Falha ao colocar sites ativos na fila.', code: 'ACTIVE_SITES_QUEUE_FAILED' });
       }
 
-      const activeSites = (data || []) as unknown as SiteRecordForCheck[];
-      const results = await mapWithConcurrency(activeSites, BATCH_CONCURRENCY, async (site) => {
-        try {
-          return await processSiteCheck(
-            { siteId: site.id, trustedSite: site },
-            { supabase }
-          );
-        } catch (error) {
-          const mapped = getRequestError(error, isProduction);
-          return {
-            success: false as const,
-            siteId: site.id,
-            siteName: site.name,
-            error: mapped.message,
-            code: mapped.code
-          };
-        }
-      });
-
-      return res.json({
-        success: results.every((result) => result.success),
-        totalChecked: results.filter((result) => result.success).length,
-        totalFailed: results.filter((result) => !result.success).length,
-        concurrency: BATCH_CONCURRENCY,
-        results
+      return res.status(202).json({
+        success: true,
+        queued: true,
+        queuedAt,
+        message: 'Todos os sites foram colocados na fila de verificação.'
       });
     } catch (error) {
       const mapped = getRequestError(error, isProduction);
@@ -1212,7 +1226,7 @@ export function startServer() {
     console.log('========================================================');
     console.log('  TECNIHUB MONITORAMENTO - BACKEND HTTP REAL');
     console.log(`  Servidor rodando na porta ${port}`);
-    console.log(`  Anti-SSRF com DNS pinning | Concorrência: ${BATCH_CONCURRENCY}`);
+    console.log(`  Anti-SSRF com DNS pinning | Cron: lote ${MONITOR_CRON_BATCH_SIZE}, concorrência ${MONITOR_CRON_CONCURRENCY}`);
     console.log('========================================================');
   });
   return server;

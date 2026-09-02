@@ -491,7 +491,12 @@ export async function checkSiteNow(siteId: string): Promise<{
   });
 }
 
-export async function checkAllSitesNow(): Promise<any> {
+export async function checkAllSitesNow(): Promise<{
+  success: true;
+  queued: true;
+  queuedAt: string;
+  message: string;
+}> {
   return apiRequest('/api/check-all', {
     method: 'POST',
     body: JSON.stringify({})

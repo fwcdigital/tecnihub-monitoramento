@@ -498,11 +498,104 @@ describe('hardening HTTP e configuração de produção', () => {
     const denied = await fetch(`${baseUrl}/api/internal/monitor/run`, { method: 'POST' });
     assert.equal(denied.status, 401);
     assert.equal((await denied.text()).includes(CRON_SECRET), false);
+    const wrongSecret = await fetch(`${baseUrl}/api/internal/monitor/run`, {
+      method: 'POST', headers: { Authorization: 'Bearer segredo-incorreto-com-mais-de-32-bytes' }
+    });
+    assert.equal(wrongSecret.status, 401);
+    assert.equal((await wrongSecret.json()).code, 'UNAUTHORIZED');
     const accepted = await fetch(`${baseUrl}/api/internal/monitor/run`, {
       method: 'POST', headers: { Authorization: `Bearer ${CRON_SECRET}` }
     });
-    assert.equal(accepted.status, 202);
-    assert.equal((await accepted.text()).includes(CRON_SECRET), false);
+    assert.equal(accepted.status, 200);
+    const acceptedText = await accepted.text();
+    assert.equal(acceptedText.includes(CRON_SECRET), false);
+    assert.equal(JSON.parse(acceptedText).claimed, 0);
+  });
+
+  it('cron espera o lote persistido terminar e usa lote/concorrência padrão 5', async () => {
+    let releaseCycle!: () => void;
+    let notifyCycleStarted!: () => void;
+    const cycleStarted = new Promise<void>((resolve) => { notifyCycleStarted = resolve; });
+    const cycleGate = new Promise<void>((resolve) => { releaseCycle = resolve; });
+    const receivedArguments: unknown[][] = [];
+    let alertRuns = 0;
+    const baseUrl = await startTestServer({
+      monitorCronSecret: CRON_SECRET,
+      getSupabase: () => ({} as any),
+      runMonitoringCycle: async (...args: any[]) => {
+        receivedArguments.push(args);
+        notifyCycleStarted();
+        await cycleGate;
+        return {
+          acquired: true, runId: 'run-sync', claimed: 5, checked: 5,
+          skipped: 0, failed: 0, concurrency: 5
+        };
+      },
+      processPendingWebhookDeliveries: async () => {
+        alertRuns++;
+        return { delivered: 1, failed: 0 };
+      }
+    });
+    let responseSettled = false;
+    const responsePromise = fetch(`${baseUrl}/api/internal/monitor/run`, {
+      method: 'POST', headers: { Authorization: `Bearer ${CRON_SECRET}` }
+    }).then((response) => {
+      responseSettled = true;
+      return response;
+    });
+    await cycleStarted;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(responseSettled, false);
+    releaseCycle();
+    const response = await responsePromise;
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(payload.runId, 'run-sync');
+    assert.equal(payload.claimed, 5);
+    assert.equal(payload.checked, 5);
+    assert.equal(payload.batchSize, 5);
+    assert.equal(payload.concurrency, 5);
+    assert.equal(payload.alerts.delivered, 1);
+    assert.equal(receivedArguments[0][1], 5);
+    assert.equal(receivedArguments[0][4], 5);
+    assert.equal(alertRuns, 1);
+  });
+
+  it('verificar todos somente persiste a fila e responde 202 sem executar checks', async () => {
+    let queuedPayload: Record<string, unknown> | null = null;
+    let queueFilter: [string, unknown] | null = null;
+    let rpcCalls = 0;
+    const supabase = {
+      from(table: string) {
+        assert.equal(table, 'sites');
+        return {
+          update(payload: Record<string, unknown>) {
+            queuedPayload = payload;
+            return {
+              async eq(field: string, value: unknown) {
+                queueFilter = [field, value];
+                return { error: null };
+              }
+            };
+          }
+        };
+      },
+      async rpc() {
+        rpcCalls++;
+        throw new Error('check não deveria ser executado');
+      }
+    } as any;
+    const baseUrl = await startTestServer({ getSupabase: () => supabase });
+    const response = await fetchAsAdmin(baseUrl, '/api/check-all', {
+      method: 'POST', body: JSON.stringify({})
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 202);
+    assert.equal(payload.success, true);
+    assert.equal(payload.queued, true);
+    assert.equal(typeof queuedPayload?.next_check_at, 'string');
+    assert.deepEqual(queueFilter, ['is_active', true]);
+    assert.equal(rpcCalls, 0);
   });
 
   it('aplica headers Helmet e mantém o status público estritamente sanitizado', async () => {

@@ -3,6 +3,7 @@ import https from 'node:https';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { CheckExecutionResult } from './httpChecker';
 import type { ProcessedSiteCheck, SiteRecordForCheck } from './siteCheckService';
+import { mapWithConcurrency } from './concurrency';
 import { normalizeHttpUrl, validateUrlForSSRF } from './ssrfProtection';
 
 export type AlertEventType = 'incident_confirmed' | 'recovery' | 'ssl_expiring' | 'dns_changed';
@@ -148,7 +149,8 @@ async function postPinnedJson(urlString: string, payload: unknown, timeoutMs: nu
 
 export async function processPendingWebhookDeliveries(
   supabase: SupabaseClient,
-  limit = 20
+  limit = 20,
+  concurrency = 5
 ): Promise<{ delivered: number; failed: number }> {
   const { data: pending, error } = await supabase
     .from('alert_deliveries')
@@ -157,41 +159,47 @@ export async function processPendingWebhookDeliveries(
     .order('created_at', { ascending: true })
     .limit(Math.max(1, Math.min(limit, 100)));
   if (error) return { delivered: 0, failed: 0 };
-  let delivered = 0;
-  let failed = 0;
-  for (const candidate of pending || []) {
-    const { data: claimed } = await supabase
-      .from('alert_deliveries')
-      .update({ status: 'processing', attempted_at: new Date().toISOString() })
-      .eq('id', candidate.id)
-      .eq('status', 'pending')
-      .select('id')
-      .maybeSingle();
-    if (!claimed) continue;
-    const webhook = Array.isArray((candidate as any).alert_webhooks)
-      ? (candidate as any).alert_webhooks[0]
-      : (candidate as any).alert_webhooks;
-    try {
-      const responseStatus = await postPinnedJson(webhook.url, candidate.payload, webhook.timeout_ms);
-      const success = responseStatus >= 200 && responseStatus <= 299;
-      await supabase.from('alert_deliveries').update({
-        status: success ? 'delivered' : 'failed',
-        attempt_count: 1,
-        response_status: responseStatus,
-        error_message: success ? null : `Webhook respondeu HTTP ${responseStatus}.`,
-        delivered_at: success ? new Date().toISOString() : null
-      }).eq('id', candidate.id);
-      success ? delivered++ : failed++;
-    } catch (deliveryError) {
-      await supabase.from('alert_deliveries').update({
-        status: 'failed',
-        attempt_count: 1,
-        error_message: deliveryError instanceof Error ? deliveryError.message.slice(0, 1000) : 'Falha inesperada.'
-      }).eq('id', candidate.id);
-      failed++;
+  const candidates = pending || [];
+  const outcomes = await mapWithConcurrency(
+    candidates,
+    Math.max(1, Math.min(concurrency, 5)),
+    async (candidate): Promise<'delivered' | 'failed' | 'skipped'> => {
+      const { data: claimed } = await supabase
+        .from('alert_deliveries')
+        .update({ status: 'processing', attempted_at: new Date().toISOString() })
+        .eq('id', candidate.id)
+        .eq('status', 'pending')
+        .select('id')
+        .maybeSingle();
+      if (!claimed) return 'skipped';
+      const webhook = Array.isArray((candidate as any).alert_webhooks)
+        ? (candidate as any).alert_webhooks[0]
+        : (candidate as any).alert_webhooks;
+      try {
+        const responseStatus = await postPinnedJson(webhook.url, candidate.payload, webhook.timeout_ms);
+        const success = responseStatus >= 200 && responseStatus <= 299;
+        await supabase.from('alert_deliveries').update({
+          status: success ? 'delivered' : 'failed',
+          attempt_count: 1,
+          response_status: responseStatus,
+          error_message: success ? null : `Webhook respondeu HTTP ${responseStatus}.`,
+          delivered_at: success ? new Date().toISOString() : null
+        }).eq('id', candidate.id);
+        return success ? 'delivered' : 'failed';
+      } catch (deliveryError) {
+        await supabase.from('alert_deliveries').update({
+          status: 'failed',
+          attempt_count: 1,
+          error_message: deliveryError instanceof Error ? deliveryError.message.slice(0, 1000) : 'Falha inesperada.'
+        }).eq('id', candidate.id);
+        return 'failed';
+      }
     }
-  }
-  return { delivered, failed };
+  );
+  return {
+    delivered: outcomes.filter((outcome) => outcome === 'delivered').length,
+    failed: outcomes.filter((outcome) => outcome === 'failed').length
+  };
 }
 
 export function alertSummaryFromResult(result: CheckExecutionResult): Record<string, unknown> {

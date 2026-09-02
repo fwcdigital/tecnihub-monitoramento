@@ -47,13 +47,13 @@ tabelas internas caso já existam quando ela for aplicada.
 2. Desabilitar temporariamente o Hostinger Cron (não existe scheduler por `setInterval` no Express).
 3. Verificar se há mais de um incidente ativo por site; não apagar nem resolver automaticamente.
 4. Aplicar 001, 002, 003, 004 e 005, nessa ordem, em ambiente validado.
-5. Configurar `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `ADMIN_SESSION_SECRET`, `MONITOR_CRON_SECRET`, `CREDENTIALS_ENCRYPTION_KEY`, `CREDENTIALS_MASTER_PASSWORD_HASH`, `ALLOWED_ORIGINS` e `TRUST_PROXY` no backend.
+5. Configurar `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_ANON_KEY`, `ADMIN_SESSION_SECRET`, `MONITOR_CRON_SECRET`, `MONITOR_CRON_BATCH_SIZE`, `MONITOR_CRON_CONCURRENCY`, `CREDENTIALS_ENCRYPTION_KEY`, `CREDENTIALS_MASTER_PASSWORD_HASH`, `ALLOWED_ORIGINS` e `TRUST_PROXY` no backend.
 6. Publicar o código em uma ação separada e validar login, página pública, CRUD, check individual, lote, histórico e métricas.
-7. Configurar o Hostinger Cron para `POST /api/internal/monitor/run` com `Authorization: Bearer <MONITOR_CRON_SECRET>` em frequência de até cinco minutos.
+7. Configurar o cron-job.org para `POST /api/internal/monitor/run` com `Authorization: Bearer <MONITOR_CRON_SECRET>` a cada minuto e timeout de 30 segundos.
 8. Confirmar uma execução em `monitoring_runs`, atualização de `next_check_at` e ausência de checks duplicados.
 9. Confirmar backup seguro e testado da chave do cofre fora do Git, Supabase e frontend.
 
-O endpoint retorna `202` quando outro lease válido já executa o ciclo. O segredo nunca deve usar prefixo `VITE_`, aparecer em URL/query string, logs, respostas ou Git.
+O endpoint retorna `200`; quando outro lease válido já executa o ciclo, informa `overlappingRun: true` e não duplica sites. O segredo nunca deve usar prefixo `VITE_`, aparecer em URL/query string, logs, respostas ou Git.
 
 ## Metodologia de uptime
 
