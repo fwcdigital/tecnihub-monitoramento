@@ -446,7 +446,7 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
                   borderRadius: '4px',
                   color: '#fff',
                   fontSize: '11px',
-                  fontFamily: 'JetBrains Mono'
+                  fontFamily: 'Saira, sans-serif'
                 }}
                 formatter={(value: any) => [`${value}s`, 'Tempo de resposta']}
               />

@@ -41,7 +41,7 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin }) => {
             </div>
             <div>
               <h1 className="text-sm font-semibold text-white">Acesso administrativo</h1>
-              <p className="text-[10px] font-mono text-neutral-500 mt-0.5">Somente equipe Tecnihub</p>
+              <p className="text-[10px] font-mono text-neutral-500 mt-0.5">Somente equipe <span className="font-brand">Tecnihub</span></p>
             </div>
           </div>
 

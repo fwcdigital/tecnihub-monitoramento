@@ -14,7 +14,7 @@ export const SettingsView: React.FC = () => {
         <div className="flex items-center gap-3">
           <div className="p-2 rounded bg-black border border-[#1e1e1e]"><TecnihubLogo size="sm" /></div>
           <div>
-            <h2 className="text-xs font-bold text-white uppercase font-mono">TECNIHUB Monitoramento</h2>
+            <h2 className="text-xs font-bold text-white uppercase"><span className="font-brand font-normal">TECNIHUB</span> Monitoramento</h2>
             <p className="text-[11px] text-neutral-400 mt-0.5">Identidade embarcada na aplicação.</p>
           </div>
         </div>

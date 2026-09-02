@@ -131,7 +131,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             Monitoramento de Sites
           </h1>
           <p className="text-xs text-neutral-400 mt-0.5">
-            Acompanhe a disponibilidade e a saúde dos sites gerenciados pela Tecnihub.
+            Acompanhe a disponibilidade e a saúde dos sites gerenciados pela <span className="font-brand">Tecnihub</span>.
           </p>
         </div>
 
@@ -409,7 +409,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 Nenhum site sendo monitorado.
               </h3>
               <p className="text-xs text-neutral-400 font-mono max-w-md mx-auto mb-4">
-                Cadastre o primeiro site para iniciar o monitoramento HTTP contínuo dos serviços TECNIHUB.
+                Cadastre o primeiro site para iniciar o monitoramento HTTP contínuo dos serviços <span className="font-brand">TECNIHUB</span>.
               </p>
               <button
                 onClick={onAddSite}

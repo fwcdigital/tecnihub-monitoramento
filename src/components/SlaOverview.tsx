@@ -86,6 +86,10 @@ export const SlaOverview: React.FC<SlaOverviewProps> = ({ sites, onRecheckSite }
     ? 'Dentro do SLA'
     : status === 'below_sla' ? 'Fora do SLA' : 'Dados insuficientes';
   const margin = report?.summary.remainingOrExceededSeconds ?? null;
+  const hasValidSlaClassification = status === 'within_sla' || status === 'below_sla';
+  const hasPartialAvailability = status === 'insufficient_data'
+    && Boolean(report?.period.hasData)
+    && report?.summary.availabilityPercent !== null;
   const selectedSite = useMemo(
     () => sites.find((site) => site.id === selectedSiteId),
     [sites, selectedSiteId]
@@ -133,15 +137,17 @@ export const SlaOverview: React.FC<SlaOverviewProps> = ({ sites, onRecheckSite }
           {!report.period.hasFullCoverage && (
             <div className="flex items-start gap-2 rounded border border-amber-800/40 bg-amber-950/15 p-2.5 text-[11px] text-amber-300">
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              {report.period.hasContinuousCoverage
-                ? 'O site não possui cobertura nas duas bordas do período. A disponibilidade parcial é informativa e não recebe classificação de SLA.'
-                : `Foram detectadas ${report.period.abnormalGapCount} lacuna(s) anormal(is) no monitoramento${report.period.largestGapSeconds ? `; a maior durou ${formatDuration(report.period.largestGapSeconds)}` : ''}. A disponibilidade não é calculada porque parte do tempo não foi observada.`}
+              {!report.period.hasData
+                ? 'Não há observações suficientes para este período. Não existe classificação de SLA e períodos sem observação não são tratados como uptime.'
+                : report.period.hasContinuousCoverage
+                  ? 'A disponibilidade parcial é apenas informativa e não recebe classificação dentro/fora do SLA. Períodos sem observação não são tratados como uptime.'
+                  : `Foram detectadas ${report.period.abnormalGapCount} lacuna(s) anormal(is) no monitoramento${report.period.largestGapSeconds ? `; a maior durou ${formatDuration(report.period.largestGapSeconds)}` : ''}. A disponibilidade não é calculada, não existe classificação de SLA e o tempo sem observação não é tratado como uptime.`}
             </div>
           )}
 
           <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
             {[
-              ['Disponibilidade', formatPercent(report.summary.availabilityPercent)],
+              [hasPartialAvailability ? 'Disponibilidade parcial' : 'Disponibilidade', formatPercent(report.summary.availabilityPercent)],
               ['Meta SLA', `${Number(report.site.slaTargetPercent).toLocaleString('pt-BR')}%`],
               ['Incidentes', String(report.summary.incidentCount)],
               ['Downtime total', formatDuration(report.summary.downtimeSeconds)],
@@ -160,12 +166,14 @@ export const SlaOverview: React.FC<SlaOverviewProps> = ({ sites, onRecheckSite }
             </div>
             <div className="rounded border border-[#252525] bg-black p-2.5 text-neutral-300">
               <span className="block text-[9px] uppercase text-neutral-500">Downtime permitido</span>
-              {formatDuration(report.summary.allowedDowntimeSeconds)}
+              {hasValidSlaClassification ? formatDuration(report.summary.allowedDowntimeSeconds) : 'Não aplicável'}
             </div>
             <div className="rounded border border-[#252525] bg-black p-2.5 text-neutral-300">
               <span className="block text-[9px] uppercase text-neutral-500">Margem</span>
-              {margin === null
-                ? 'Dados insuficientes'
+              {!hasValidSlaClassification
+                ? 'Não aplicável'
+                : margin === null
+                  ? 'Dados insuficientes'
                 : margin >= 0 ? `${formatDuration(margin)} restante` : `${formatDuration(Math.abs(margin))} excedida`}
             </div>
             <div className="rounded border border-[#252525] bg-black p-2.5 text-neutral-300">

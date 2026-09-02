@@ -63,7 +63,7 @@ export const Header: React.FC<HeaderProps> = ({
         </button>
 
         <div className="hidden sm:flex items-center gap-2 text-[11px] font-mono text-neutral-400">
-          <span className="text-neutral-500 font-semibold tracking-wider">TECNIHUB</span>
+          <span className="font-brand text-neutral-500 tracking-wider">TECNIHUB</span>
           <span className="text-neutral-700">/</span>
           <span className="text-white font-medium">{tabTitles[currentTab]?.title}</span>
         </div>

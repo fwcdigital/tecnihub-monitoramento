@@ -256,7 +256,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               TH
             </div>
             <div className="truncate">
-              <p className="text-[11px] font-semibold text-neutral-200 truncate">Equipe Tecnihub</p>
+              <p className="text-[11px] font-semibold text-neutral-200 truncate">Equipe <span className="font-brand font-normal">Tecnihub</span></p>
               <p className="text-[9px] text-neutral-500 font-mono truncate">{adminEmail}</p>
             </div>
           </div>

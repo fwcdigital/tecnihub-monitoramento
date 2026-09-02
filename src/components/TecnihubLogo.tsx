@@ -55,7 +55,7 @@ export const TecnihubLogo: React.FC<TecnihubLogoProps> = ({
       {/* Brand & Tool Name Typography */}
       <div className="flex flex-col">
         <div className="flex items-center gap-1.5 leading-none">
-          <span className={`font-bold tracking-wider uppercase font-mono ${textSizes[size]} ${inverted ? 'text-neutral-900' : 'text-white'}`}>
+          <span className={`font-brand tracking-wider uppercase ${textSizes[size]} ${inverted ? 'text-neutral-900' : 'text-white'}`}>
             TECNIHUB
           </span>
         </div>
