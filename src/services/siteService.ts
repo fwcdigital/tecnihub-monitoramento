@@ -8,6 +8,8 @@ import {
   IncidentType,
   HostingProvider,
   MonitoringFrequency,
+  SiteDeletionImpact,
+  SiteDeletionResult,
   SiteMetrics,
   MonitoringSeriesPoint,
   TrackingToolResult
@@ -500,12 +502,18 @@ export async function updateSiteInDatabase(siteId: string, siteData: Partial<Sit
   return true;
 }
 
-export async function deleteSiteFromDatabase(siteId: string, confirmation: string): Promise<boolean> {
-  await apiRequest(`/api/sites/${encodeURIComponent(siteId)}`, {
+export async function getSiteDeletionImpact(siteId: string): Promise<SiteDeletionImpact> {
+  const response = await apiRequest<{ impact: SiteDeletionImpact }>(
+    `/api/sites/${encodeURIComponent(siteId)}/deletion-impact`
+  );
+  return response.impact;
+}
+
+export async function deleteSiteFromDatabase(siteId: string, confirmation: string): Promise<SiteDeletionResult> {
+  return apiRequest<SiteDeletionResult>(`/api/sites/${encodeURIComponent(siteId)}`, {
     method: 'DELETE',
     body: JSON.stringify({ confirmation })
   });
-  return true;
 }
 
 export async function togglePauseSiteInDatabase(siteId: string, currentIsActive: boolean): Promise<boolean> {

@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   Site, 
   Incident, 
   NavigationTab,
+  SiteDeletionImpact,
   TechnicalCredentialPayload
 } from './types';
 import { 
@@ -10,6 +11,7 @@ import {
   getIncidentsFromDatabase,
   createSiteInDatabase, 
   updateSiteInDatabase, 
+  getSiteDeletionImpact,
   deleteSiteFromDatabase, 
   togglePauseSiteInDatabase, 
   checkSiteNow, 
@@ -57,6 +59,9 @@ function AdminApp() {
   const [isSavingSite, setIsSavingSite] = useState(false);
   const [siteToEdit, setSiteToEdit] = useState<Site | null>(null);
   const [siteToDelete, setSiteToDelete] = useState<Site | null>(null);
+  const [siteDeletionImpact, setSiteDeletionImpact] = useState<SiteDeletionImpact | null>(null);
+  const [isLoadingDeletionImpact, setIsLoadingDeletionImpact] = useState(false);
+  const deletionImpactRequestId = useRef(0);
   const [isDeletingSite, setIsDeletingSite] = useState(false);
   const [selectedSiteDetail, setSelectedSiteDetail] = useState<Site | null>(null);
   const [selectedIncidentDetail, setSelectedIncidentDetail] = useState<Incident | null>(null);
@@ -193,11 +198,37 @@ function AdminApp() {
     setIsAddModalOpen(true);
   };
 
-  const handleOpenDeleteSite = (siteId: string) => {
+  const handleOpenDeleteSite = async (siteId: string) => {
     const site = sites.find((s) => s.id === siteId);
     if (site) {
+      const requestId = ++deletionImpactRequestId.current;
       setSiteToDelete(site);
+      setSiteDeletionImpact(null);
+      setIsLoadingDeletionImpact(true);
+      try {
+        const impact = await getSiteDeletionImpact(siteId);
+        if (deletionImpactRequestId.current === requestId) setSiteDeletionImpact(impact);
+      } catch (error: any) {
+        if (deletionImpactRequestId.current === requestId) {
+          setSiteToDelete(null);
+          addToast(
+            'error',
+            'Não foi possível preparar a exclusão',
+            error.message || 'Falha ao consultar os dados vinculados ao site.'
+          );
+        }
+      } finally {
+        if (deletionImpactRequestId.current === requestId) setIsLoadingDeletionImpact(false);
+      }
     }
+  };
+
+  const handleCloseDeleteSite = () => {
+    if (isDeletingSite) return;
+    deletionImpactRequestId.current += 1;
+    setSiteToDelete(null);
+    setSiteDeletionImpact(null);
+    setIsLoadingDeletionImpact(false);
   };
 
   // Save Site (Create or Update)
@@ -293,17 +324,28 @@ function AdminApp() {
 
     setIsDeletingSite(true);
     try {
-      await deleteSiteFromDatabase(siteId, confirmation);
+      const result = await deleteSiteFromDatabase(siteId, confirmation);
 
       setSites((prev) => prev.filter((s) => s.id !== siteId));
+      setIncidents((prev) => prev.filter((incident) => incident.siteId !== siteId));
 
       if (selectedSiteDetail?.id === siteId) {
         setSelectedSiteDetail(null);
         setCurrentTab('dashboard');
       }
 
+      if (selectedIncidentDetail?.siteId === siteId) {
+        setSelectedIncidentDetail(null);
+        setIsIncidentModalOpen(false);
+      }
+
       setSiteToDelete(null);
-      addToast('info', 'Site removido', `${site.siteName} foi excluído da monitoria.`);
+      setSiteDeletionImpact(null);
+      addToast(
+        'success',
+        'Site excluído definitivamente',
+        `${site.siteName} e todo o histórico relacionado foram removidos (${result.deleted.checks} verificações e ${result.deleted.incidents} incidentes).`
+      );
     } catch (err: any) {
       console.error('Erro ao excluir site:', err);
       addToast('error', 'Erro ao excluir site', err.message);
@@ -600,7 +642,9 @@ function AdminApp() {
       <ConfirmDeleteModal
         isOpen={Boolean(siteToDelete)}
         site={siteToDelete}
-        onClose={() => setSiteToDelete(null)}
+        impact={siteDeletionImpact}
+        isLoadingImpact={isLoadingDeletionImpact}
+        onClose={handleCloseDeleteSite}
         onConfirm={handleConfirmDeleteSite}
         isDeleting={isDeletingSite}
       />

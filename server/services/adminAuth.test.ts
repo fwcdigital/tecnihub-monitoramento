@@ -198,6 +198,11 @@ describe('autenticação administrativa', () => {
       headers: { 'Content-Type': 'application/json', Origin: baseUrl },
       body: JSON.stringify({})
     })).status, 401);
+    assert.equal((await fetch(`${baseUrl}/api/sites/site-1`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', Origin: baseUrl },
+      body: JSON.stringify({ confirmation: 'portal.example' })
+    })).status, 401);
   });
 
   it('aceita acesso administrativo com sessão válida', async () => {
@@ -393,18 +398,16 @@ describe('CRUD administrativo de sites e preservação de histórico', () => {
     assert.equal((await response.json()).code, 'SITE_ACTIVE_UPDATE_FAILED');
   });
 
-  it('exige nome ou domínio digitado e bloqueia exclusão quando existe histórico', async () => {
-    let deleteCalled = false;
+  it('exige nome ou domínio digitado antes de chamar a exclusão transacional', async () => {
+    let rpcCalled = false;
     const supabase = {
       from(table: string) {
         if (table === 'sites') return {
-          select: () => ({ eq: () => ({ single: async () => ({ data: { id: 'site-1', name: 'Portal Principal', domain: 'portal.example' }, error: null }) }) }),
-          delete: () => ({ eq: async () => { deleteCalled = true; return { error: null }; } })
+          select: () => ({ eq: () => ({ single: async () => ({ data: { id: 'site-1', name: 'Portal Principal', domain: 'portal.example' }, error: null }) }) })
         };
-        if (table === 'checks') return { select: () => ({ eq: async () => ({ count: 4, error: null }) }) };
-        if (table === 'incidents') return { select: () => ({ eq: async () => ({ count: 1, error: null }) }) };
         throw new Error(`Tabela inesperada: ${table}`);
-      }
+      },
+      rpc: async () => { rpcCalled = true; return { data: null, error: null }; }
     } as any;
     const baseUrl = await startTestServer({ getSupabase: () => supabase });
     const mismatch = await fetchAsAdmin(baseUrl, '/api/sites/site-1', {
@@ -412,27 +415,62 @@ describe('CRUD administrativo de sites e preservação de histórico', () => {
     });
     assert.equal(mismatch.status, 400);
     assert.equal((await mismatch.json()).code, 'DELETE_CONFIRMATION_MISMATCH');
-
-    const blocked = await fetchAsAdmin(baseUrl, '/api/sites/site-1', {
-      method: 'DELETE', body: JSON.stringify({ confirmation: 'Portal Principal' })
-    });
-    assert.equal(blocked.status, 409);
-    const payload = await blocked.json();
-    assert.equal(payload.code, 'SITE_HAS_HISTORY');
-    assert.deepEqual(payload.history, { checks: 4, incidents: 1 });
-    assert.equal(deleteCalled, false);
+    assert.equal(rpcCalled, false);
   });
 
-  it('permite exclusão confirmada por domínio somente quando não existe histórico', async () => {
-    let deleteCalled = false;
+  it('exclui site com checks, incidente, alertas e credenciais usando uma única RPC', async () => {
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const supabase = {
+      from(table: string) {
+        assert.equal(table, 'sites');
+        return {
+          select: () => ({ eq: () => ({ single: async () => ({
+            data: { id: 'site-1', name: 'Portal Principal', domain: 'portal.example' }, error: null
+          }) }) })
+        };
+      },
+      async rpc(name: string, args: Record<string, unknown>) {
+        calls.push({ name, args });
+        return {
+          data: [{
+            deleted_site_id: 'site-1', checks_deleted: 38, incidents_deleted: 1,
+            alert_events_deleted: 2, alert_deliveries_deleted: 4,
+            credentials_deleted: 3, credential_audit_deleted: 8
+          }],
+          error: null
+        };
+      }
+    } as any;
+    const baseUrl = await startTestServer({ getSupabase: () => supabase });
+    const response = await fetchAsAdmin(baseUrl, '/api/sites/site-1', {
+      method: 'DELETE', body: JSON.stringify({ confirmation: 'Portal Principal' })
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(payload.success, true);
+    assert.deepEqual(payload.deleted, {
+      checks: 38, incidents: 1, alertEvents: 2, alertDeliveries: 4,
+      credentials: 3, credentialAudit: 8
+    });
+    assert.deepEqual(calls, [{
+      name: 'delete_site_permanently',
+      args: { p_site_id: 'site-1', p_confirmation: 'Portal Principal' }
+    }]);
+  });
+
+  it('permite exclusão definitiva de site sem histórico', async () => {
     const supabase = {
       from(table: string) {
         if (table === 'sites') return {
-          select: () => ({ eq: () => ({ single: async () => ({ data: { id: 'site-empty', name: 'Site vazio', domain: 'vazio.example' }, error: null }) }) }),
-          delete: () => ({ eq: async () => { deleteCalled = true; return { error: null }; } })
+          select: () => ({ eq: () => ({ single: async () => ({ data: { id: 'site-empty', name: 'Site vazio', domain: 'vazio.example' }, error: null }) }) })
         };
-        return { select: () => ({ eq: async () => ({ count: 0, error: null }) }) };
-      }
+        throw new Error(`Tabela inesperada: ${table}`);
+      },
+      rpc: async () => ({ data: [{
+        deleted_site_id: 'site-empty', checks_deleted: 0, incidents_deleted: 0,
+        alert_events_deleted: 0, alert_deliveries_deleted: 0,
+        credentials_deleted: 0, credential_audit_deleted: 0
+      }], error: null })
     } as any;
     const baseUrl = await startTestServer({ getSupabase: () => supabase });
     const response = await fetchAsAdmin(baseUrl, '/api/sites/site-empty', {
@@ -440,7 +478,49 @@ describe('CRUD administrativo de sites e preservação de histórico', () => {
     });
     assert.equal(response.status, 200);
     assert.equal((await response.json()).success, true);
-    assert.equal(deleteCalled, true);
+  });
+
+  it('não informa sucesso quando a RPC falha e preserva atomicidade no banco', async () => {
+    const supabase = {
+      from: () => ({
+        select: () => ({ eq: () => ({ single: async () => ({
+          data: { id: 'site-1', name: 'Portal', domain: 'portal.example' }, error: null
+        }) }) })
+      }),
+      rpc: async () => ({ data: null, error: { code: '23503', message: 'falha controlada' } })
+    } as any;
+    const baseUrl = await startTestServer({ getSupabase: () => supabase });
+    const response = await fetchAsAdmin(baseUrl, '/api/sites/site-1', {
+      method: 'DELETE', body: JSON.stringify({ confirmation: 'portal.example' })
+    });
+    const payload = await response.json();
+    assert.equal(response.status, 500);
+    assert.equal(payload.success, undefined);
+    assert.equal(payload.code, 'SITE_DELETE_FAILED');
+    assert.match(payload.error, /Nenhum dado foi removido/i);
+  });
+
+  it('retorna o impacto completo usado pela confirmação forte', async () => {
+    const supabase = {
+      rpc: async (name: string, args: Record<string, unknown>) => {
+        assert.equal(name, 'get_site_deletion_impact');
+        assert.deepEqual(args, { p_site_id: 'site-1' });
+        return { data: [{
+          site_id: 'site-1', site_name: 'Portal', site_domain: 'portal.example',
+          checks_count: 38, incidents_count: 1, alert_events_count: 2,
+          alert_deliveries_count: 4, credentials_count: 3, credential_audit_count: 8
+        }], error: null };
+      }
+    } as any;
+    const baseUrl = await startTestServer({ getSupabase: () => supabase });
+    const response = await fetchAsAdmin(baseUrl, '/api/sites/site-1/deletion-impact');
+    const payload = await response.json();
+    assert.equal(response.status, 200);
+    assert.deepEqual(payload.impact, {
+      siteId: 'site-1', siteName: 'Portal', siteDomain: 'portal.example',
+      checks: 38, incidents: 1, alertEvents: 2, alertDeliveries: 4,
+      credentials: 3, credentialAudit: 8
+    });
   });
 });
 

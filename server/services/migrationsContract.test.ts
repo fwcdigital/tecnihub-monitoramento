@@ -9,6 +9,7 @@ const monitoringSql = readMigration('20260901_003_monitoring_engine.sql');
 const webhookSql = readMigration('20260901_004_alert_webhooks.sql');
 const vaultSql = readMigration('20260901_005_technical_credentials_vault.sql');
 const alertsSql = readMigration('20260902_006_transactional_alert_outbox_email.sql');
+const deleteSiteSql = readMigration('20260902_007_delete_site_permanently.sql');
 
 describe('contratos das migrations finais', () => {
   it('mantém migrations numeradas e ordenáveis sem reaplicar schema.sql', () => {
@@ -19,7 +20,8 @@ describe('contratos das migrations finais', () => {
       '20260901_003_monitoring_engine.sql',
       '20260901_004_alert_webhooks.sql',
       '20260901_005_technical_credentials_vault.sql',
-      '20260902_006_transactional_alert_outbox_email.sql'
+      '20260902_006_transactional_alert_outbox_email.sql',
+      '20260902_007_delete_site_permanently.sql'
     ]);
     assert.equal(files.includes('schema.sql'), false);
   });
@@ -63,7 +65,7 @@ describe('contratos das migrations finais', () => {
 
   it('não contém remoção destrutiva de dados operacionais ou do cofre', () => {
     const allSql = readdirSync(migrationsDirectory)
-      .filter((file) => file.endsWith('.sql'))
+      .filter((file) => file.endsWith('.sql') && file !== '20260902_007_delete_site_permanently.sql')
       .map(readMigration)
       .join('\n');
     assert.doesNotMatch(allSql, /\bTRUNCATE\b/i);
@@ -107,5 +109,47 @@ describe('contratos das migrations finais', () => {
     assert.match(alertsSql, /ON CONFLICT DO NOTHING/gi);
     assert.match(alertsSql, /attempted_at \+ interval '60 seconds'/i);
     assert.match(alertsSql, /SET search_path = pg_catalog, pg_temp/gi);
+  });
+
+  it('exclusão definitiva é uma RPC transacional restrita ao service role', () => {
+    assert.match(deleteSiteSql, /\bBEGIN;/i);
+    assert.match(deleteSiteSql, /CREATE OR REPLACE FUNCTION public\.delete_site_permanently\([\s\S]+p_confirmation TEXT/i);
+    assert.match(deleteSiteSql, /FROM public\.sites site[\s\S]+WHERE site\.id = p_site_id[\s\S]+FOR UPDATE/i);
+    assert.match(deleteSiteSql, /Confirmacao de exclusao invalida/i);
+    assert.match(deleteSiteSql, /SECURITY DEFINER[\s\S]+SET search_path = pg_catalog, pg_temp/gi);
+    assert.match(deleteSiteSql, /REVOKE ALL ON FUNCTION public\.delete_site_permanently\(UUID, TEXT\) FROM PUBLIC, anon, authenticated/i);
+    assert.match(deleteSiteSql, /GRANT EXECUTE ON FUNCTION public\.delete_site_permanently\(UUID, TEXT\) TO service_role/i);
+    assert.doesNotMatch(deleteSiteSql, /EXCEPTION\s+WHEN/i);
+    assert.match(deleteSiteSql, /COMMIT;\s*$/i);
+  });
+
+  it('remove dependências na ordem correta e deixa o site por último', () => {
+    const orderedDeletes = [
+      'DELETE FROM public.credential_audit_log',
+      'DELETE FROM public.technical_credentials',
+      'DELETE FROM public.alert_deliveries',
+      'DELETE FROM public.monitoring_alert_events',
+      'DELETE FROM public.checks',
+      'DELETE FROM public.incidents',
+      'DELETE FROM public.sites'
+    ];
+    let previousIndex = -1;
+    for (const statement of orderedDeletes) {
+      const statementIndex = deleteSiteSql.indexOf(statement);
+      assert.ok(statementIndex > previousIndex, `${statement} deve aparecer após a dependência anterior`);
+      previousIndex = statementIndex;
+    }
+    assert.match(deleteSiteSql, /delivery\.site_id = p_site_id[\s\S]+delivery\.check_id IN[\s\S]+delivery\.incident_id IN/i);
+    assert.match(deleteSiteSql, /event\.site_id = p_site_id[\s\S]+event\.check_id IN[\s\S]+event\.incident_id IN/i);
+    assert.match(deleteSiteSql, /audit\.site_id = p_site_id[\s\S]+audit\.credential_id IN/i);
+  });
+
+  it('expõe impacto completo para confirmação sem excluir recursos globais', () => {
+    assert.match(deleteSiteSql, /CREATE OR REPLACE FUNCTION public\.get_site_deletion_impact/i);
+    for (const table of [
+      'checks', 'incidents', 'monitoring_alert_events', 'alert_deliveries',
+      'technical_credentials', 'credential_audit_log'
+    ]) assert.match(deleteSiteSql, new RegExp(`public\\.${table}`, 'i'));
+    assert.doesNotMatch(deleteSiteSql, /DELETE FROM public\.(alert_webhooks|alert_email_configs|domain_rdap_cache|monitoring_runs|monitoring_scheduler_locks)/i);
   });
 });

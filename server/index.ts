@@ -1230,6 +1230,40 @@ export function createApp(options: CreateAppOptions = {}) {
     return res.json({ site: data });
   });
 
+  app.get('/api/sites/:siteId/deletion-impact', async (req, res) => {
+    const supabase = getSupabase();
+    if (!supabase) return sendDatabaseUnavailable(res, isProduction);
+
+    const { data, error } = await supabase.rpc('get_site_deletion_impact', {
+      p_site_id: req.params.siteId
+    });
+    if (error) {
+      return res.status(500).json({
+        error: 'Falha ao avaliar os dados vinculados ao site.',
+        code: 'SITE_DELETION_IMPACT_FAILED'
+      });
+    }
+
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row) {
+      return res.status(404).json({ error: 'Site não encontrado.', code: 'SITE_NOT_FOUND' });
+    }
+
+    return res.json({
+      impact: {
+        siteId: row.site_id,
+        siteName: row.site_name,
+        siteDomain: row.site_domain,
+        checks: Number(row.checks_count || 0),
+        incidents: Number(row.incidents_count || 0),
+        alertEvents: Number(row.alert_events_count || 0),
+        alertDeliveries: Number(row.alert_deliveries_count || 0),
+        credentials: Number(row.credentials_count || 0),
+        credentialAudit: Number(row.credential_audit_count || 0)
+      }
+    });
+  });
+
   app.delete('/api/sites/:siteId', async (req, res) => {
     const supabase = getSupabase();
     if (!supabase) return sendDatabaseUnavailable(res, isProduction);
@@ -1248,34 +1282,51 @@ export function createApp(options: CreateAppOptions = {}) {
     const expectedName = String(site.name).trim().toLowerCase();
     if (confirmation !== expectedDomain && confirmation !== expectedName) {
       return res.status(400).json({
-        error: `Digite exatamente "${site.domain}" para confirmar a exclusão definitiva.`,
+        error: `Digite exatamente "${site.domain}" ou "${site.name}" para confirmar a exclusão definitiva.`,
         code: 'DELETE_CONFIRMATION_MISMATCH'
       });
     }
 
-    const [checksResult, incidentsResult] = await Promise.all([
-      supabase.from('checks').select('id', { count: 'exact', head: true }).eq('site_id', site.id),
-      supabase.from('incidents').select('id', { count: 'exact', head: true }).eq('site_id', site.id)
-    ]);
-    if (checksResult.error || incidentsResult.error) {
-      return res.status(500).json({ error: 'Falha ao avaliar o histórico do site.', code: 'HISTORY_QUERY_FAILED' });
-    }
-
-    const checksCount = checksResult.count || 0;
-    const incidentsCount = incidentsResult.count || 0;
-    if (checksCount > 0 || incidentsCount > 0) {
-      return res.status(409).json({
-        error: `Exclusão bloqueada para preservar ${checksCount} check(s) e ${incidentsCount} incidente(s). Desative o monitoramento ou autorize uma estratégia de preservação histórica.`,
-        code: 'SITE_HAS_HISTORY',
-        history: { checks: checksCount, incidents: incidentsCount }
+    const { data: deletionData, error: deleteError } = await supabase.rpc('delete_site_permanently', {
+      p_site_id: site.id,
+      p_confirmation: String(req.body?.confirmation || '')
+    });
+    if (deleteError) {
+      if (deleteError.code === 'P0002') {
+        return res.status(404).json({ error: 'Site não encontrado.', code: 'SITE_NOT_FOUND' });
+      }
+      if (deleteError.code === 'P0001') {
+        return res.status(400).json({
+          error: `Digite exatamente "${site.domain}" ou "${site.name}" para confirmar a exclusão definitiva.`,
+          code: 'DELETE_CONFIRMATION_MISMATCH'
+        });
+      }
+      return res.status(500).json({
+        error: 'Falha ao excluir o site. Nenhum dado foi removido.',
+        code: 'SITE_DELETE_FAILED'
       });
     }
 
-    const { error: deleteError } = await supabase.from('sites').delete().eq('id', site.id);
-    if (deleteError) {
-      return res.status(500).json({ error: 'Falha ao excluir site.', code: 'SITE_DELETE_FAILED' });
+    const deleted = Array.isArray(deletionData) ? deletionData[0] : deletionData;
+    if (!deleted?.deleted_site_id) {
+      return res.status(500).json({
+        error: 'A exclusão não foi confirmada pelo banco. Nenhum sucesso foi informado.',
+        code: 'SITE_DELETE_NOT_CONFIRMED'
+      });
     }
-    return res.json({ success: true, deletedSiteId: site.id });
+
+    return res.json({
+      success: true,
+      deletedSiteId: deleted.deleted_site_id,
+      deleted: {
+        checks: Number(deleted.checks_deleted || 0),
+        incidents: Number(deleted.incidents_deleted || 0),
+        alertEvents: Number(deleted.alert_events_deleted || 0),
+        alertDeliveries: Number(deleted.alert_deliveries_deleted || 0),
+        credentials: Number(deleted.credentials_deleted || 0),
+        credentialAudit: Number(deleted.credential_audit_deleted || 0)
+      }
+    });
   });
 
   app.post('/api/check-site', async (req, res) => {

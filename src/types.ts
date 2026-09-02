@@ -135,6 +135,24 @@ export interface Site {
   wordpress?: Record<string, any> | null;
 }
 
+export interface SiteDeletionImpact {
+  siteId: string;
+  siteName: string;
+  siteDomain: string;
+  checks: number;
+  incidents: number;
+  alertEvents: number;
+  alertDeliveries: number;
+  credentials: number;
+  credentialAudit: number;
+}
+
+export interface SiteDeletionResult {
+  success: true;
+  deletedSiteId: string;
+  deleted: Omit<SiteDeletionImpact, 'siteId' | 'siteName' | 'siteDomain'>;
+}
+
 export interface DbSite {
   id: string;
   client_name: string;

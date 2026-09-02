@@ -1,10 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { Trash2, X, AlertTriangle } from 'lucide-react';
-import { Site } from '../types';
+import { Site, SiteDeletionImpact } from '../types';
 
 interface ConfirmDeleteModalProps {
   isOpen: boolean;
   site: Site | null;
+  impact: SiteDeletionImpact | null;
+  isLoadingImpact?: boolean;
   onClose: () => void;
   onConfirm: (siteId: string, confirmation: string) => Promise<void> | void;
   isDeleting?: boolean;
@@ -13,6 +15,8 @@ interface ConfirmDeleteModalProps {
 export const ConfirmDeleteModal: React.FC<ConfirmDeleteModalProps> = ({
   isOpen,
   site,
+  impact,
+  isLoadingImpact = false,
   onClose,
   onConfirm,
   isDeleting = false
@@ -27,6 +31,8 @@ export const ConfirmDeleteModal: React.FC<ConfirmDeleteModalProps> = ({
   const normalizedConfirmation = confirmation.trim().toLowerCase();
   const confirmationMatches = normalizedConfirmation === site.domain.trim().toLowerCase()
     || normalizedConfirmation === site.siteName.trim().toLowerCase();
+  const impactReady = impact?.siteId === site.id;
+  const plural = (value: number, singular: string, pluralLabel: string) => `${value} ${value === 1 ? singular : pluralLabel}`;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-xs">
@@ -52,7 +58,7 @@ export const ConfirmDeleteModal: React.FC<ConfirmDeleteModalProps> = ({
         {/* Content */}
         <div className="p-4 space-y-3">
           <p className="text-xs text-neutral-300">
-            Esta ação tenta excluir definitivamente o cadastro abaixo. Para manter o histórico, prefira desativar o monitoramento.
+            Para preservar o cadastro e o histórico, cancele e use <strong className="text-white">Desativar monitoramento</strong>.
           </p>
 
           <div className="p-3 rounded bg-[#000000] border border-[#1e1e1e] space-y-1">
@@ -65,9 +71,27 @@ export const ConfirmDeleteModal: React.FC<ConfirmDeleteModalProps> = ({
             <p className="text-[11px] font-mono text-neutral-400">{site.url}</p>
           </div>
 
-          <p className="text-[11px] text-rose-400/90 font-mono bg-rose-950/20 border border-rose-900/30 p-2.5 rounded">
-            A exclusão será bloqueada se já existirem checks ou incidentes, evitando perda silenciosa de histórico.
-          </p>
+          <div className="text-[11px] text-rose-300 bg-rose-950/20 border border-rose-900/40 p-3 rounded space-y-2">
+            {isLoadingImpact || !impactReady ? (
+              <p className="font-mono">Calculando todo o histórico vinculado...</p>
+            ) : (
+              <>
+                <p className="font-semibold text-rose-200">
+                  Esta ação excluirá permanentemente este site e todo o histórico relacionado, incluindo:
+                </p>
+                <ul className="font-mono space-y-0.5 list-disc pl-4">
+                  <li>{plural(impact.checks, 'verificação', 'verificações')}</li>
+                  <li>{plural(impact.incidents, 'incidente', 'incidentes')}</li>
+                  <li>{plural(impact.alertEvents + impact.alertDeliveries, 'registro de alerta', 'registros de alertas')}</li>
+                  <li>{plural(impact.credentials, 'acesso técnico', 'acessos técnicos')}</li>
+                  {impact.credentialAudit > 0 && (
+                    <li>{plural(impact.credentialAudit, 'registro de auditoria de acesso', 'registros de auditoria de acessos')}</li>
+                  )}
+                </ul>
+                <p className="font-bold text-rose-200">Esta ação não pode ser desfeita.</p>
+              </>
+            )}
+          </div>
 
           <div className="space-y-1.5">
             <label className="block text-[11px] text-neutral-300 font-mono">
@@ -98,7 +122,7 @@ export const ConfirmDeleteModal: React.FC<ConfirmDeleteModalProps> = ({
           <button
             type="button"
             onClick={() => onConfirm(site.id, confirmation.trim())}
-            disabled={isDeleting || !confirmationMatches}
+            disabled={isDeleting || isLoadingImpact || !impactReady || !confirmationMatches}
             className="px-3.5 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded transition-colors flex items-center gap-1.5 shadow-sm disabled:opacity-50"
           >
             <Trash2 className="w-3.5 h-3.5" />
