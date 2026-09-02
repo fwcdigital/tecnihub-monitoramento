@@ -126,6 +126,21 @@ describe('diagnósticos reais do HTML e TLS', () => {
     assert.equal(tracking.metaPixel.detected, true);
   });
 
+  it('detecta assinaturas HTML alternativas sem depender de plugin', () => {
+    const tracking = detectTrackingEvidence(`
+      <script src="https://www.google-analytics.com/analytics.js"></script>
+      <script>ga('create', 'UA-123456-7'); fbq('init', 99887766);</script>
+      <noscript><img src="https://www.facebook.com/tr?id=11223344&ev=PageView"></noscript>
+      <script src="https://d335luupugsy2.cloudfront.net/js/loader-scripts/conta.js"></script>
+    `);
+
+    assert.deepEqual(tracking.ga4.foundIds, ['UA-123456-7']);
+    assert.equal(tracking.ga4.detected, true);
+    assert.deepEqual(tracking.metaPixel.foundIds, ['99887766', '11223344']);
+    assert.equal(tracking.rdStation.detected, true);
+    assert.equal(tracking.rdStation.confirmation, 'html_evidence_only');
+  });
+
   it('classifica SSL a sete dias como crítico sem criar downtime por si só', async () => {
     const result = await executeHttpCheck('https://ssl.example', 1000, {
       validateUrl: async () => ({ valid: true, resolvedAddresses: [{ address: '93.184.216.34', family: 4 }] }),
@@ -317,6 +332,65 @@ describe('serviço central de checks', () => {
     assert.equal(response.checkId, 'check-1');
     assert.equal(persistedResponseTime, null);
   });
+
+  it('persiste diagnósticos automáticos disponíveis independentemente de flags legadas', async () => {
+    let persisted: Record<string, unknown> = {};
+    let domainQueries = 0;
+    const site = {
+      id: 'site-automatico', url: 'https://automatico.example', name: 'Site automático',
+      domain: 'automatico.example', is_active: true,
+      monitor_response_time: false, monitor_ssl: false, monitor_domain: false
+    };
+    const fakeSupabase = {
+      async rpc(_name: string, args: Record<string, unknown>) {
+        persisted = args;
+        return { data: [{ check_id: 'check-auto', incident_transition: 'unchanged' }], error: null };
+      },
+      from() {
+        return {
+          select: () => ({
+            eq: () => ({
+              not: () => ({
+                order: () => ({ limit: async () => ({ data: [], error: null }) })
+              })
+            })
+          })
+        };
+      }
+    } as any;
+    const result = classifyHttpStatus(200, 42, site.url);
+    result.observedIp = '93.184.216.34';
+    result.dns = { a: ['93.184.216.34'], aaaa: [], cname: [], observedIp: result.observedIp };
+    result.ssl = {
+      applicable: true, valid: true, hostnameValid: true, issuer: 'Emissor',
+      validTo: '2027-09-01T00:00:00.000Z', daysRemaining: 365, severity: 'normal'
+    };
+
+    await processSiteCheck({ siteId: site.id, trustedSite: site }, {
+      supabase: fakeSupabase,
+      executeCheck: async () => result,
+      getDomainDiagnostics: async () => {
+        domainQueries++;
+        return {
+          domain: site.domain, status: 'available', registrar: 'Registrador',
+          fetchedAt: '2026-09-01T12:00:00.000Z', cached: false
+        };
+      },
+      now: () => new Date('2026-09-01T12:00:00.000Z')
+    });
+
+    assert.equal(domainQueries, 1);
+    assert.equal(persisted.p_response_time, 42);
+    assert.deepEqual(persisted.p_dns_records, result.dns);
+    assert.deepEqual(persisted.p_ssl, result.ssl);
+    assert.equal((persisted.p_domain_rdap as any).registrar, 'Registrador');
+    assert.deepEqual(persisted.p_diagnostics, {
+      tracking: null,
+      expectedContent: null,
+      transport: { finalUrl: site.url, redirectCount: 0, observedIp: '93.184.216.34' },
+      classification: { incidentEligible: false, httpStatus: 200, status: 'online' }
+    });
+  });
 });
 
 describe('transições persistidas de incidentes', () => {
@@ -395,6 +469,29 @@ describe('SSL, DNS e alertas controlados', () => {
     });
     assert.deepEqual(result.dns?.a, ['93.184.216.34']);
     assert.equal(result.dns?.aaaa?.length, 1);
+    assert.deepEqual(result.dns?.cname, ['edge.example.net']);
+    assert.equal(result.observedIp, '93.184.216.34');
+  });
+
+  it('enriquece A, AAAA e CNAME sem trocar o IP validado usado na conexão', async () => {
+    let connectedAddress = '';
+    const result = await executeHttpCheck('https://dns-completo.example', 1000, {
+      validateUrl: async () => ({
+        valid: true,
+        resolvedAddresses: [{ address: '93.184.216.34', family: 4 }]
+      }),
+      resolveA: async () => ['93.184.216.34', '93.184.216.35'],
+      resolveAaaa: async () => ['2606:2800:220:1:248:1893:25c8:1946'],
+      resolveCname: async () => ['edge.example.net.'],
+      requestUrl: async (_url, address) => {
+        connectedAddress = address.address;
+        return { statusCode: 200, observedIp: address.address };
+      }
+    });
+
+    assert.equal(connectedAddress, '93.184.216.34');
+    assert.deepEqual(result.dns?.a, ['93.184.216.34', '93.184.216.35']);
+    assert.deepEqual(result.dns?.aaaa, ['2606:2800:220:1:248:1893:25c8:1946']);
     assert.deepEqual(result.dns?.cname, ['edge.example.net']);
     assert.equal(result.observedIp, '93.184.216.34');
   });
@@ -557,11 +654,15 @@ describe('mapeamento sem telemetria fabricada', () => {
   it('usa o último check válido mesmo quando o estado persistido ainda está pending', () => {
     const check: DbCheck = {
       id: 'check-online', site_id: dbSite.id, checked_at: '2026-09-01T12:00:00.000Z',
-      status: 'online', http_status: 200, response_time: 120, incident_eligible: false
+      status: 'online', http_status: 200, response_time: 120, incident_eligible: false,
+      final_url: 'https://www.example.com/final', redirect_count: 2
     };
     const site = mapDbSiteToSite({ ...dbSite, monitoring_state: 'pending' }, [check]);
     assert.equal(site.status, 'online');
     assert.equal(site.responseTime, 0.12);
+    assert.equal(site.finalUrl, 'https://www.example.com/final');
+    assert.equal(site.redirectCount, 2);
+    assert.equal(site.checksHistory[0].redirectCount, 2);
   });
 
   it('mantém warning durante recuperação enquanto o incidente continua ativo', () => {

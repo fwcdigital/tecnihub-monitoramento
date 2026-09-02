@@ -5,6 +5,7 @@ import type { TLSSocket } from 'node:tls';
 import { URL } from 'node:url';
 import {
   normalizeHttpUrl,
+  isPrivateOrReservedIp,
   ResolvedAddress,
   SSRFValidationResult,
   validateUrlForSSRF
@@ -96,6 +97,8 @@ export interface HttpCheckerDependencies {
     timeoutMs: number,
     bodyLimitBytes?: number
   ) => Promise<RawHttpResponse>;
+  resolveA?: (hostname: string) => Promise<string[]>;
+  resolveAaaa?: (hostname: string) => Promise<string[]>;
   resolveCname?: (hostname: string) => Promise<string[]>;
 }
 
@@ -155,7 +158,15 @@ function sslFromSocket(url: URL, socket: TLSSocket): SslDiagnostics {
   if (url.protocol !== 'https:') {
     return { applicable: false, valid: null, hostnameValid: null, severity: 'not_applicable' };
   }
-  const certificate = socket.getPeerCertificate();
+  let certificate: ReturnType<TLSSocket['getPeerCertificate']>;
+  try {
+    certificate = socket.getPeerCertificate();
+  } catch {
+    return {
+      applicable: true, valid: null, hostnameValid: null, severity: 'unavailable',
+      error: 'O runtime encerrou o socket antes da leitura do certificado.'
+    };
+  }
   if (!certificate || !certificate.valid_to) {
     return {
       applicable: true, valid: null, hostnameValid: null, severity: 'unavailable',
@@ -211,6 +222,10 @@ function performPinnedRequest(
       const chunks: Buffer[] = [];
       let storedBytes = 0;
       let completed = false;
+      // Capture transport diagnostics while the socket is certainly alive. Some
+      // hosting runtimes release TLS peer-certificate details before `end`.
+      const observedIp = response.socket.remoteAddress?.replace(/^::ffff:/, '');
+      const ssl = sslFromSocket(url, response.socket as TLSSocket);
       const finish = () => {
         if (completed) return;
         completed = true;
@@ -218,8 +233,8 @@ function performPinnedRequest(
           statusCode: response.statusCode || 0,
           location: response.headers.location,
           body: Buffer.concat(chunks).toString('utf8'),
-          observedIp: response.socket.remoteAddress?.replace(/^::ffff:/, ''),
-          ssl: sslFromSocket(url, response.socket as TLSSocket)
+          observedIp,
+          ssl
         });
       };
       response.on('data', (chunk: Buffer | string) => {
@@ -319,18 +334,22 @@ export function detectTrackingEvidence(
     gtm: evidence(body, uniqueMatches(body, /\b(GTM-[A-Z0-9]+)\b/gi), [
       { pattern: /googletagmanager\.com\/gtm\.js/i, label: 'script_gtm' }
     ], expectations?.gtm),
-    ga4: evidence(body, uniqueMatches(body, /\b(G-[A-Z0-9]{5,})\b/gi), [
+    ga4: evidence(body, uniqueMatches(body, /\b(G-[A-Z0-9]{5,}|UA-\d+-\d+)\b/gi), [
       { pattern: /googletagmanager\.com\/gtag\/js/i, label: 'script_gtag' },
-      { pattern: /gtag\s*\(\s*['"]config['"]/i, label: 'config_gtag' }
+      { pattern: /gtag\s*\(\s*['"]config['"]/i, label: 'config_gtag' },
+      { pattern: /google-analytics\.com\/(?:analytics|collect)\.js/i, label: 'script_google_analytics' }
     ], expectations?.ga4),
     googleAds: evidence(body, uniqueMatches(body, /\b(AW-\d+)\b/gi), [
       { pattern: /googleadservices\.com|googleads\.g\.doubleclick\.net/i, label: 'script_google_ads' }
     ], expectations?.googleAds),
-    metaPixel: evidence(body, uniqueMatches(body, /fbq\s*\(\s*['"]init['"]\s*,\s*['"](\d+)['"]/gi), [
+    metaPixel: evidence(body, [...new Set([
+      ...uniqueMatches(body, /fbq\s*\(\s*['"]init['"]\s*,\s*['"]?(\d+)['"]?/gi),
+      ...uniqueMatches(body, /facebook\.com\/tr\?[^"'<>]*\bid=(\d+)/gi)
+    ])], [
       { pattern: /connect\.facebook\.net\/.+\/fbevents\.js/i, label: 'script_meta_pixel' }
     ], expectations?.metaPixel),
     rdStation: evidence(body, [], [
-      { pattern: /rdstation\.com|rdstation-static|rdstation_forms/i, label: 'script_rd_station' }
+      { pattern: /rdstation\.com|rdstation-static|rdstation_forms|d335luupugsy2\.cloudfront\.net\/js\/loader-scripts/i, label: 'script_rd_station' }
     ])
   };
 }
@@ -339,12 +358,45 @@ function hasMissingExpectedTracking(tracking: TrackingDiagnostics): boolean {
   return Object.values(tracking).some((tool) => tool.expectedId && tool.expectedIdFound === false);
 }
 
-async function getCnameRecords(hostname: string, dependencies: HttpCheckerDependencies): Promise<string[]> {
-  if (dependencies.resolveCname) {
-    try { return await dependencies.resolveCname(hostname); } catch { return []; }
-  }
-  if (dependencies.validateUrl) return [];
-  try { return await dns.resolveCname(hostname); } catch { return []; }
+async function resolveDnsRecords(
+  hostname: string,
+  resolvedAddresses: ResolvedAddress[],
+  dependencies: HttpCheckerDependencies
+): Promise<Pick<DnsDiagnostics, 'a' | 'aaaa' | 'cname'>> {
+  const injectedValidation = Boolean(dependencies.validateUrl);
+  const fallbackA = resolvedAddresses.filter((record) => record.family === 4).map((record) => record.address);
+  const fallbackAaaa = resolvedAddresses.filter((record) => record.family === 6).map((record) => record.address);
+  const safeResolve = async (resolver: (() => Promise<string[]>) | undefined): Promise<string[]> => {
+    if (!resolver) return [];
+    try {
+      return await new Promise<string[]>((resolve) => {
+        const timer = setTimeout(() => resolve([]), 3_000);
+        resolver().then(
+          (records) => { clearTimeout(timer); resolve(records); },
+          () => { clearTimeout(timer); resolve([]); }
+        );
+      });
+    } catch {
+      return [];
+    }
+  };
+  const [resolvedA, resolvedAaaa, cname] = await Promise.all([
+    safeResolve(dependencies.resolveA
+      ? () => dependencies.resolveA!(hostname)
+      : injectedValidation ? undefined : () => dns.resolve4(hostname)),
+    safeResolve(dependencies.resolveAaaa
+      ? () => dependencies.resolveAaaa!(hostname)
+      : injectedValidation ? undefined : () => dns.resolve6(hostname)),
+    safeResolve(dependencies.resolveCname
+      ? () => dependencies.resolveCname!(hostname)
+      : injectedValidation ? undefined : () => dns.resolveCname(hostname))
+  ]);
+  const publicUnique = (values: string[]) => [...new Set(values.filter((value) => !isPrivateOrReservedIp(value)))];
+  return {
+    a: publicUnique([...resolvedA, ...fallbackA]),
+    aaaa: publicUnique([...resolvedAaaa, ...fallbackAaaa]),
+    cname: [...new Set(cname.map((record) => record.replace(/\.$/, '')))]
+  };
 }
 
 export async function executeHttpCheck(
@@ -384,10 +436,10 @@ export async function executeHttpCheck(
     }
     const parsedUrl = new URL(currentUrl);
     const selectedAddress = validation.resolvedAddresses[0];
+    const resolvedDns = await resolveDnsRecords(parsedUrl.hostname, validation.resolvedAddresses, dependencies);
     const dnsDiagnostics: DnsDiagnostics = {
-      a: validation.resolvedAddresses.filter((record) => record.family === 4).map((record) => record.address),
-      aaaa: validation.resolvedAddresses.filter((record) => record.family === 6).map((record) => record.address),
-      cname: await getCnameRecords(parsedUrl.hostname, dependencies), observedIp: selectedAddress.address
+      ...resolvedDns,
+      observedIp: selectedAddress.address
     };
     const remainingTimeout = Math.max(1, timeoutMs - elapsedMs());
     if (remainingTimeout <= 1) return mapConnectionError({ code: 'ETIMEDOUT' }, elapsedMs(), currentUrl, dnsDiagnostics);

@@ -212,7 +212,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <div className="flex justify-between items-center text-neutral-300">
               <span className="flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-                Operacionais
+                Online
               </span>
               <span className="font-bold text-emerald-400">{onlineCount}</span>
             </div>
@@ -229,7 +229,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <div className="flex justify-between items-center text-neutral-300">
                 <span className="flex items-center gap-1.5">
                   <span className="w-1.5 h-1.5 rounded-full bg-rose-500"></span>
-                  Indisponíveis
+                  Offline
                 </span>
                 <span className="font-bold text-rose-400">{offlineCount}</span>
               </div>

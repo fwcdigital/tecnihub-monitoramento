@@ -19,6 +19,8 @@ export interface CheckRecord {
   errorMessage?: string;
   incidentId?: string;
   observedIp?: string;
+  finalUrl?: string;
+  redirectCount?: number;
 }
 
 export interface PeriodMetrics {
@@ -101,6 +103,8 @@ export interface Site {
   domainDaysRemaining: number | null;
   lastCheck: string; // relative or ISO
   httpStatus: number | string | null;
+  finalUrl?: string;
+  redirectCount?: number;
 
   // Monitoring toggles
   monitorAvailability: boolean;

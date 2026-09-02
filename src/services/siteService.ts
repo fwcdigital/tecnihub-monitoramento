@@ -134,7 +134,9 @@ export function mapDbSiteToSite(
     errorType: check.error_type || undefined,
     errorMessage: check.error_message || undefined,
     incidentId: check.incident_id || undefined,
-    observedIp: check.observed_ip || undefined
+    observedIp: check.observed_ip || undefined,
+    finalUrl: check.final_url || undefined,
+    redirectCount: check.redirect_count ?? 0
   }));
 
   const trackingDiagnostics = latestCheck?.diagnostics?.tracking as Record<string, any> | undefined;
@@ -182,6 +184,8 @@ export function mapDbSiteToSite(
       : typeof domainInfo?.days_remaining === 'number' ? domainInfo.days_remaining : null,
     lastCheck: latestCheck ? formatRelativeTime(latestCheck.checked_at) : 'Ainda não verificado',
     httpStatus: latestCheck?.http_status ?? (latestCheck ? missingHttpLabel(latestCheck.status, latestCheck.error_type) : null),
+    finalUrl: latestCheck?.final_url || undefined,
+    redirectCount: latestCheck?.redirect_count ?? undefined,
     monitorAvailability: true,
     monitorResponseTime: dbSite.monitor_response_time !== false,
     monitorSsl: dbSite.monitor_ssl !== false,

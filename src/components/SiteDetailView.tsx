@@ -650,13 +650,13 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-4 gap-3">
         <div className="p-3 rounded bg-[#0a0a0a] border border-[#1e1e1e] text-[10px] font-mono space-y-1">
           <strong className="text-neutral-300 uppercase">DNS / IP real</strong>
           <p className="text-neutral-500">IP observado: <span className="text-neutral-300">{site.dns?.observedIp || history[0]?.observedIp || diagnosticUnavailable}</span></p>
-          <p className="text-neutral-500">A: <span className="text-neutral-300">{site.dns?.a?.join(', ') || diagnosticUnavailable}</span></p>
-          <p className="text-neutral-500">AAAA: <span className="text-neutral-300">{site.dns?.aaaa?.join(', ') || diagnosticUnavailable}</span></p>
-          <p className="text-neutral-500">CNAME: <span className="text-neutral-300">{site.dns?.cname?.join(', ') || diagnosticUnavailable}</span></p>
+          <p className="text-neutral-500">A: <span className="text-neutral-300">{site.dns ? site.dns.a?.length ? site.dns.a.join(', ') : 'Nenhum registro publicado' : diagnosticUnavailable}</span></p>
+          <p className="text-neutral-500">AAAA: <span className="text-neutral-300">{site.dns ? site.dns.aaaa?.length ? site.dns.aaaa.join(', ') : 'Nenhum registro publicado' : diagnosticUnavailable}</span></p>
+          <p className="text-neutral-500">CNAME: <span className="text-neutral-300">{site.dns ? site.dns.cname?.length ? site.dns.cname.join(', ') : 'Nenhum registro publicado' : diagnosticUnavailable}</span></p>
         </div>
         <div className="p-3 rounded bg-[#0a0a0a] border border-[#1e1e1e] text-[10px] font-mono space-y-1">
           <strong className="text-neutral-300 uppercase">Certificado TLS</strong>
@@ -667,10 +667,17 @@ export const SiteDetailView: React.FC<SiteDetailViewProps> = ({
         </div>
         <div className="p-3 rounded bg-[#0a0a0a] border border-[#1e1e1e] text-[10px] font-mono space-y-1">
           <strong className="text-neutral-300 uppercase">Domínio / WordPress</strong>
-          <p className="text-neutral-500">Registrador: <span className="text-neutral-300">{site.domainInfo?.registrar || domainUnavailableLabel(site)}</span></p>
-          <p className="text-neutral-500">Expiração: <span className="text-neutral-300">{site.domainInfo?.expiresAt || site.domainInfo?.expires_at_registry ? new Date(site.domainInfo.expiresAt || site.domainInfo.expires_at_registry).toLocaleDateString('pt-BR') : domainUnavailableLabel(site)}</span></p>
+          <p className="text-neutral-500">Registrador/registro: <span className="text-neutral-300">{site.domainInfo?.registrar || site.domainInfo?.registry || (site.domainInfo?.status === 'available' ? 'Não informado pelo RDAP' : domainUnavailableLabel(site))}</span></p>
+          <p className="text-neutral-500">Expiração: <span className="text-neutral-300">{site.domainInfo?.expiresAt || site.domainInfo?.expires_at_registry ? new Date(site.domainInfo.expiresAt || site.domainInfo.expires_at_registry).toLocaleDateString('pt-BR') : site.domainInfo?.status === 'available' ? 'Não informada pelo RDAP' : domainUnavailableLabel(site)}</span></p>
           <p className="text-neutral-500">WordPress: <span className="text-neutral-300">{site.wordpress?.detected ? 'Detectado' : site.isWordPress ? 'Configurado; sem evidência na última verificação' : 'Não configurado'}</span></p>
           <p className="text-neutral-500">Admin básico: <span className="text-neutral-300">{site.wordpress?.administrativeAvailable === true ? 'Acessível/protegido' : site.wordpress?.administrativeAvailable === false ? 'Indisponível' : 'Não aplicável'}</span></p>
+        </div>
+        <div className="p-3 rounded bg-[#0a0a0a] border border-[#1e1e1e] text-[10px] font-mono space-y-1">
+          <strong className="text-neutral-300 uppercase">HTTP / Redirects</strong>
+          <p className="text-neutral-500">HTTP: <span className="text-neutral-300">{site.httpStatus ?? 'Ainda não verificado'}</span></p>
+          <p className="text-neutral-500">Tempo: <span className="text-neutral-300">{site.responseTime === null ? responseTimeUnavailableLabel(site) : `${site.responseTime.toFixed(2)}s`}</span></p>
+          <p className="text-neutral-500">Redirecionamentos: <span className="text-neutral-300">{site.redirectCount ?? (history.length ? 'Falha na verificação' : 'Ainda não verificado')}</span></p>
+          <p className="text-neutral-500">URL final: <span className="break-all text-neutral-300">{site.finalUrl || (history.length ? 'Falha na verificação' : 'Ainda não verificado')}</span></p>
         </div>
       </div>
 

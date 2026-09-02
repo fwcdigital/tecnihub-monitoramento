@@ -169,6 +169,11 @@ async function persistStructuredResult(
   const diagnostics = {
     tracking: result.tracking || null,
     expectedContent: result.expectedContent || null,
+    transport: {
+      finalUrl: result.finalUrl,
+      redirectCount: result.redirectCount,
+      observedIp: result.observedIp || null
+    },
     classification: {
       incidentEligible: result.incidentEligible,
       httpStatus: result.httpStatus,
@@ -180,7 +185,7 @@ async function persistStructuredResult(
     p_checked_at: checkedAt,
     p_status: result.status,
     p_http_status: result.httpStatus,
-    p_response_time: site.monitor_response_time === false || result.httpStatus === null || result.incidentEligible
+    p_response_time: result.httpStatus === null || result.incidentEligible
       ? null
       : result.responseTime,
     p_final_url: result.finalUrl,
@@ -228,12 +233,11 @@ export async function processSiteCheck(
   const targetUrl = site?.url || input.url;
   if (!targetUrl) throw new SiteCheckError('URL ou siteId é obrigatório para a verificação.', 400, 'TARGET_REQUIRED');
 
-  const domainPromise = site?.domain && site.monitor_domain !== false && dependencies.supabase
+  const domainPromise = site?.domain && dependencies.supabase
     ? (dependencies.getDomainDiagnostics || getDomainRdapDiagnostics)(dependencies.supabase, site.domain, now)
     : Promise.resolve(undefined);
   const result = await executeCheck(targetUrl, checkOptionsForSite(site));
   if (site) await addWordPressDiagnostics(site, result, executeCheck);
-  if (site?.monitor_ssl === false) result.ssl = undefined;
   const domain = await domainPromise;
   const checkedAt = now().toISOString();
   let checkId: string | undefined;
